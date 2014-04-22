@@ -123,6 +123,12 @@ function ParsoidService(options) {
 		return interwikiRE;
 	}
 
+	function getUriRE() {
+		var regex = getInterwikiRE();
+		regex += ( regex.length ? '|' : '' ) + 'https?%3[aA]%2[fF]%2[fF].*';
+		return regex;
+	}
+
 	var htmlSpecialChars = function ( s ) {
 		return s.replace(/&/g,'&amp;')
 			.replace(/</g,'&lt;')
@@ -334,7 +340,12 @@ function ParsoidService(options) {
 	});
 
 	function interParams( req, res, next ) {
-		res.local('iwp', req.params[0] || parsoidConfig.defaultWiki || '');
+		if ( req.params[0].match(/https?:\/\//) ) {
+			parsoidConfig.setInterwiki( req.params[0], req.params[0] );
+			res.local('iwp', req.params[0] );
+		} else {
+			res.local('iwp', req.params[0] || parsoidConfig.defaultWiki || '');
+		}
 		res.local('pageName', req.params[1] || '');
 		next();
 	}
@@ -649,12 +660,12 @@ function ParsoidService(options) {
 	}
 
 	// Regular article parsing
-	app.get( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEnvMw, function(req, res) {
+	app.get( new RegExp( '/(' + getUriRE() + ')/(.*)' ), interParams, parserEnvMw, function(req, res) {
 		wt2html( req, res );
 	});
 
 	// Regular article serialization using POST
-	app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEnvMw, function ( req, res ) {
+	app.post( new RegExp( '/(' + getUriRE() + ')/(.*)' ), interParams, parserEnvMw, function ( req, res ) {
 		// parse html or wt
 		if ( req.body.wt ) {
 			wt2html( req, res, req.body.wt );
