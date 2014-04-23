@@ -132,7 +132,8 @@ var fnames = {
 						width: width,
 						url: baseurl,
 						descriptionurl: durl,
-						mediatype: mediatype
+						mediatype: mediatype,
+						user: 'n00b'
 					} ]
 				},
 				response = {
