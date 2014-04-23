@@ -498,7 +498,13 @@ function ParsoidService(options) {
 
 	function html2wt( req, res, html ) {
 		var env = res.local('env');
-		env.page.id = req.body.oldid || null;
+
+		if ( req.body.oldwt ) {
+			env.setPageSrcInfo( req.body.oldwt );
+			env.page.id = null;
+        } else {
+			env.page.id = req.body.oldid || null;
+        }
 
 		if ( env.conf.parsoid.allowCORS ) {
 			// allow cross-domain requests (CORS) so that parsoid service
