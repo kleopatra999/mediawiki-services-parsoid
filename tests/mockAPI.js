@@ -12,13 +12,16 @@ var IMAGE_DESC_URL = IMAGE_BASE_URL;
 //IMAGE_DESC_URL='http://commons.wikimedia.org/wiki';
 var FILE_PROPS = {
 	'Foobar.jpg': {
-		size: 7881, width: 1941, height: 220, bits: 8, mime: 'image/jpeg'
+		size: 7881, width: 1941, height: 220, bits: 8, mime: 'image/jpeg', mediatype: 'BITMAP'
 	},
 	'Thumb.png': {
-		size: 22589, width: 135, height: 135, bits: 8, mime: 'image/png'
+		size: 22589, width: 135, height: 135, bits: 8, mime: 'image/png', mediatype: 'BITMAP'
 	},
 	'Foobar.svg': {
-		size: 12345, width: 240, height: 180, bits: 24, mime: 'image/svg+xml'
+		size: 12345, width: 240, height: 180, bits: 24, mime: 'image/svg+xml', mediatype: 'BITMAP'
+	},
+	'Foobar.mov': {
+		size: 12345, width: 640, height: 480, bits: 8, mime: 'video/quicktime', mediatype: 'VIDEO'
 	}
 };
 
@@ -42,13 +45,16 @@ var fnames = {
 		'Image:Foobar.svg': 'Foobar.svg',
 		'File:Foobar.svg': 'Foobar.svg',
 		'Image:Thumb.png': 'Thumb.png',
-		'File:Thumb.png': 'Thumb.png'
+		'File:Thumb.png': 'Thumb.png',
+		'Image:Foobar.mov': 'Foobar.mov',
+		'File:Foobar.mov': 'Foobar.mov'
 	},
 
 	pnames = {
 		'Image:Foobar.jpg': 'File:Foobar.jpg',
 		'Image:Foobar.svg': 'File:Foobar.svg',
-		'Image:Thumb.png': 'File:Thumb.png'
+		'Image:Thumb.png': 'File:Thumb.png',
+		'Image:Foobar.mov': 'File:Foobar.mov'
 	},
 
 	formatters = {
@@ -121,7 +127,7 @@ var fnames = {
 				theight = body.iiurlheight,
 				turl = IMAGE_BASE_URL + '/thumb/' + md5prefix + normFilename,
 				durl = IMAGE_DESC_URL + '/' + normFilename,
-				mediatype = (props.mime === 'image/svg+xml') ? 'DRAWING' : 'BITMAP',
+				mediatype = (props.mime === 'image/svg+xml') ? 'DRAWING' : props.mediatype,
 				imageinfo = {
 					pageid: 1,
 					ns: 6,
