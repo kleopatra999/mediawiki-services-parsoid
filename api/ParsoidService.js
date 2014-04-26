@@ -332,7 +332,7 @@ function ParsoidService(options) {
 	app.get('/', function(req, res){
 		// Ignore this root (healthcheck) in New Relic metrics
 		if ( newrelic ) {
-			newrelic.setIgnoreTransaction(true);packa
+			newrelic.setIgnoreTransaction(true);
 		}
 		res.write('<html><body>\n');
 		res.write('<h3>Welcome to the <a href="https://www.mediawiki.org/wiki/Parsoid">Parsoid</a> web service.</h3>\n');
