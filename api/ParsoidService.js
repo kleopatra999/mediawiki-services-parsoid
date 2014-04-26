@@ -20,7 +20,8 @@ var express = require('express'),
 	util = require('util'),
 	pkg = require('../package.json'),
 	Diff = require('../lib/mediawiki.Diff.js').Diff,
-	LogData = require('../lib/LogData.js').LogData;
+	LogData = require('../lib/LogData.js').LogData,
+	newrelic;
 
 // local includes
 var mp = '../lib/';
@@ -102,6 +103,10 @@ function ParsoidService(options) {
 	 * @property {ParsoidConfig}
 	 */
 	var parsoidConfig = new ParsoidConfig( options, null );
+
+	if ( parsoidConfig.newRelic ) {
+		newrelic = require('newrelic');
+	}
 
 	/**
 	 * The serializer to use for the web requests.
@@ -325,6 +330,10 @@ function ParsoidService(options) {
 	app.use(express.compress());
 
 	app.get('/', function(req, res){
+		// Ignore this root (healthcheck) in New Relic metrics
+		if ( newrelic ) {
+			newrelic.setIgnoreTransaction(true);packa
+		}
 		res.write('<html><body>\n');
 		res.write('<h3>Welcome to the <a href="https://www.mediawiki.org/wiki/Parsoid">Parsoid</a> web service.</h3>\n');
 		res.write( '<p>See <a href="https://www.mediawiki.org/wiki/Parsoid#The_Parsoid_web_API">the API documentation on mediawiki.org</a>. ' );
