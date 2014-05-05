@@ -349,7 +349,7 @@ function ParsoidService(options) {
 	});
 
 	function interParams( req, res, next ) {
-		if ( req.params[0].match(/https?:\/\//) ) {
+		if ( req.params[0] && req.params[0].match(/https?:\/\//) ) {
 			parsoidConfig.setInterwiki( req.params[0], req.params[0] );
 			res.local('iwp', req.params[0] );
 		} else {
