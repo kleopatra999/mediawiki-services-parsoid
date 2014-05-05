@@ -6,7 +6,6 @@
 .deploy
 
 
-api/localsettings.js
 api/nohup.out
 api/npm-debug.log
 tests/parserTests.cache
