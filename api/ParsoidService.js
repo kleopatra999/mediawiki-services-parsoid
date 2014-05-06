@@ -130,7 +130,7 @@ function ParsoidService(options) {
 
 	function getUriRE() {
 		var regex = getInterwikiRE();
-		regex += ( regex.length ? '|' : '' ) + 'https?%3[aA]%2[fF]%2[fF].*';
+		regex += ( regex.length ? '|' : '' ) + 'https?%3[aA]%2[fF]%2[fF][^/]*';
 		return regex;
 	}
 
