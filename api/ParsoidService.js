@@ -45,7 +45,8 @@ function ParsoidService(options) {
 		MWParserEnvironment = require( mp + 'mediawiki.parser.environment.js' ).MWParserEnvironment,
 		TemplateRequest = libtr.TemplateRequest;
 
-	var interwikiRE;
+	var interwikiRE,
+		requests = 0;
 
 
 /**
@@ -78,6 +79,13 @@ function ParsoidService(options) {
 		} else {
 			env.responseSent = true;
 			res.end.apply(res, Array.prototype.slice.call(arguments, 2));
+
+			if ( parsoidConfig.maxRequestsPerChild ) {
+				requests++;
+				if ( requests >= parsoidConfig.maxRequestsPerChild ) {
+					process.exit(0);
+				}
+			}
 		}
 	}
 
