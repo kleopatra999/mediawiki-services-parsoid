@@ -29,14 +29,12 @@ var plainCallback = function ( env, err, results ) {
 
 			output += testDivider;
 			if ( result.type === 'fail' ) {
-				output += 'Semantic difference:\n\n';
+				output += 'Semantic difference' + (result.selser ? ' (selser)' : '') + ':\n\n';
 				output += result.wtDiff + '\n';
-				output += diffDivider;
-				output += 'HTML diff:\n\n';
-				output += result.htmlDiff + '\n';
+				output += diffDivider + 'HTML diff:\n\n' + result.htmlDiff + '\n';
 				semanticDiffs++;
 			} else {
-				output += 'Syntactic difference:\n\n';
+				output += 'Syntactic difference' + (result.selser ? ' (selser)' : '') + ':\n\n';
 				output += result.wtDiff + '\n';
 				syntacticDiffs++;
 			}
@@ -74,18 +72,38 @@ var xmlCallback = function ( env, err, results ) {
 	var prefix = ( env && env.conf && env.conf.wiki && env.conf.wiki.iwp ) || '';
 	var title = ( env && env.page && env.page.name ) || '';
 
-	var output = '<testsuite name="Roundtrip article ' + encodeAttribute( prefix + ':' + title ) + '">';
+	var output = '<testsuites>\n';
+	var outputTestSuite = function (selser) {
+			output += '<testsuite name="Roundtrip article ' + encodeAttribute( prefix + ':' + title );
+			if (selser) {
+				output += ' (selser)';
+			}
+			output += '">\n';
+	};
 
 	if ( err ) {
+		outputTestSuite(false);
 		output += '<testcase name="entire article"><error type="parserFailedToFinish">';
 		output += encodeXmlEntities( err.stack || err.toString() );
 		output += '</error></testcase>';
+	} else if (!results.length) {
+		outputTestSuite(false);
 	} else {
-
+		var currentSelser = results[0].selser;
+		outputTestSuite(currentSelser);
 		for ( i = 0; i < results.length; i++ ) {
 			result = results[i];
 
-			output += '<testcase name="' + encodeAttribute( prefix + ':' + title ) + ' character ' + result.offset[0].start + '">';
+			// When going from normal to selser results, switch to a new
+			// test suite.
+			if (currentSelser !== result.selser) {
+				output += '</testsuite>\n';
+				currentSelser = result.selser;
+				outputTestSuite(currentSelser);
+			}
+
+			output += '<testcase name="' + encodeAttribute( prefix + ':' + title );
+			output += ' character ' + result.offset[0].start + '">\n';
 
 			if ( result.type === 'fail' ) {
 				output += '<failure type="significantHtmlDiff">\n';
@@ -108,9 +126,16 @@ var xmlCallback = function ( env, err, results ) {
 			output += '</testcase>\n';
 		}
 	}
+	output += '</testsuite>\n';
 
 	// Output the profiling data
 	if ( env.profile ) {
+
+		// Delete the total timer to avoid serializing it
+		if (env.profile.time && env.profile.time.total_timer) {
+			delete( env.profile.time.total_timer );
+		}
+
 		output += '<perfstats>\n';
 		for ( var type in env.profile ) {
 			for ( var prop in env.profile[ type ] ) {
@@ -123,8 +148,7 @@ var xmlCallback = function ( env, err, results ) {
 		}
 		output += '</perfstats>\n';
 	}
-
-	output += '</testsuite>\n';
+	output += '</testsuites>';
 
 	return output;
 };
@@ -385,9 +409,7 @@ var checkIfSignificant = function ( env, offsets, src, body, out, cb, document )
 	cb( null, env, results );
 };
 
-var doubleRoundtripDiff = function ( env, offsets, body, out, cb ) {
-	var src = env.page.src;
-
+var doubleRoundtripDiff = function ( env, offsets, src, body, out, cb ) {
 	if ( offsets.length > 0 ) {
 		env.setPageSrcInfo( out );
 		env.errCB = function ( error ) {
@@ -404,7 +426,8 @@ var doubleRoundtripDiff = function ( env, offsets, body, out, cb ) {
 	}
 };
 
-var parsoidPost = function ( env, parsoidURL, prefix, title, text, oldid, cb ) {
+var parsoidPost = function (env, parsoidURL, prefix, title, text, oldid,
+					recordSizes, profilePrefix, cb) {
 	var data = {};
 	if ( oldid ) {
 		data.oldid = oldid;
@@ -430,25 +453,33 @@ var parsoidPost = function ( env, parsoidURL, prefix, title, text, oldid, cb ) {
 			cb(res.body, null);
 		} else {
 			if ( env.profile ) {
+				if (!profilePrefix) {
+					profilePrefix = '';
+				}
 				// Record the time it's taken to parse
-				var timePrefix = oldid ? 'html2wt' : 'wt2html';
+				var timePrefix = profilePrefix + (oldid ? 'html2wt' : 'wt2html');
 				if ( res.headers[ 'x-parsoid-performance' ] ) {
 					env.profile.time[ timePrefix ] =
 						parseInt( res.headers[ 'x-parsoid-performance' ].
 							match( /duration=((\d)+);/ )[1], 10 );
 				}
-				// Record the sizes
-				var sizePrefix = oldid ? 'wt' : 'html';
-				env.profile.size[ sizePrefix + 'raw' ] =
-					body.length;
-				// Compress to record the gzipped size
-				zlib.gzip( res.body, function( err, gzippedbuf ) {
-					if ( !err ) {
-						env.profile.size[ sizePrefix + 'gzip' ] =
-							gzippedbuf.length;
-					}
-					cb( null, body );
-				} );
+
+				if (recordSizes) {
+					// Record the sizes
+					var sizePrefix = profilePrefix + (oldid ? 'wt' : 'html');
+					env.profile.size[ sizePrefix + 'raw' ] =
+						body.length;
+					// Compress to record the gzipped size
+					zlib.gzip( res.body, function( err, gzippedbuf ) {
+						if ( !err ) {
+							env.profile.size[ sizePrefix + 'gzip' ] =
+								gzippedbuf.length;
+						}
+						cb( null, body );
+					} );
+				} else {
+					cb(null, body);
+				}
 			} else {
 				cb( null, body );
 			}
@@ -456,22 +487,44 @@ var parsoidPost = function ( env, parsoidURL, prefix, title, text, oldid, cb ) {
 	} );
 };
 
-var roundTripDiff = function ( env, html, out, cb ) {
+var roundTripDiff = function ( env, src, html, out, cb ) {
 	var diff, offsetPairs;
 
 	try {
-		diff = Diff.diffLines(out, env.page.src);
+		diff = Diff.diffLines(out, src);
 		offsetPairs = Diff.convertDiffToOffsetPairs(diff);
 
 		if ( diff.length > 0 ) {
 			var body = domino.createDocument( html ).body;
-			doubleRoundtripDiff( env, offsetPairs, body, out, cb );
+			doubleRoundtripDiff( env, offsetPairs, src, body, out, cb );
 		} else {
 			cb( null, env, [] );
 		}
 	} catch ( e ) {
 		cb( e, env, [] );
 	}
+};
+
+var selserRoundTripDiff = function (env, html, out, diffs, cb) {
+	var selserDiff, offsetPairs,
+		src = env.page.src.replace(/\n(?=\n)/g, '\n ');
+	// Remove the selser trigger comment
+	out = out.replace(/<!--rtSelserEditTestComment-->\n*$/, '');
+	out = out.replace(/\n(?=\n)/g, '\n ');
+
+	roundTripDiff(env, src, html, out, function (err, env, selserDiffs) {
+		if (err) {
+			cb(err, env, diffs);
+		} else {
+			for (var sD in selserDiffs) {
+				selserDiffs[sD].selser = true;
+			}
+			if (selserDiffs.length) {
+				diffs = diffs.concat(selserDiffs);
+			}
+			cb(null, env, diffs);
+		}
+	});
 };
 
 var fetch = function ( page, cb, options ) {
@@ -499,29 +552,55 @@ var fetch = function ( page, cb, options ) {
 			if ( err ) {
 				cb( err, env, [] );
 			} else {
-				env.setPageSrcInfo( src_and_metadata );
+				// Shortcut for calling parsoidPost with common options
+				var parsoidPostShort = function (postBody, postOldId,
+						postRecordSizes, postProfilePrefix, postCb) {
+					parsoidPost(env, options.parsoidURL, prefix, page,
+						postBody, postOldId, postRecordSizes, postProfilePrefix,
+						function (err, postResult) {
+							if (err) {
+								cb(err, env, []);
+							} else {
+								postCb(postResult);
+							}
+						});
+					};
+
+				// Once we have the diffs between the round-tripped wt,
+				// to test rt selser we need to modify the HTML and request
+				// the wt again to compare with selser, and then concat the
+				// resulting diffs to the ones we got from basic rt
+				var rtSelserTest = function (origHTMLBody, err, env, rtDiffs) {
+					if (err) {
+						cb(err, env, rtDiffs);
+					} else {
+						var newDocument = DU.parseHTML(origHTMLBody),
+							newNode = newDocument.createComment('rtSelserEditTestComment');
+						newDocument.body.appendChild(newNode);
+						parsoidPostShort(newDocument.outerHTML,
+							src_and_metadata.revision.revid, false, 'selser',
+							function (wtSelserBody) {
+								// Finish the total time now
+								if ( env.profile && env.profile.time ) {
+									env.profile.time.total += new Date() - env.profile.time.total_timer;
+								}
+
+								selserRoundTripDiff(env, origHTMLBody, wtSelserBody, rtDiffs, cb);
+							});
+					}
+				};
+
+				env.setPageSrcInfo(src_and_metadata);
 				// First, fetch the HTML for the requested page's wikitext
-				parsoidPost( env, options.parsoidURL, prefix, page,
-					env.page.src, null, function ( err, htmlBody ) {
-						if ( err ) {
-							cb( err, env, [] );
-						} else {
-							// And now, request the wikitext for the obtained HTML
-							parsoidPost( env, options.parsoidURL, prefix, page,
-								htmlBody, src_and_metadata.revision.revid, function ( err, wtBody ) {
-									if ( err ) {
-										cb( err, env, [] );
-									} else {
-										// Finish the total time now
-										if ( env.profile && env.profile.time ) {
-											env.profile.time.total += new Date() - env.profile.time.total_timer;
-											delete( env.profile.time.total_timer );
-										}
-										roundTripDiff( env, htmlBody, wtBody, cb );
-									}
-								} );
-						}
-				} );
+				parsoidPostShort(env.page.src, null, true, null, function (htmlBody) {
+					// Now, request the wikitext for the obtained HTML
+					parsoidPostShort(htmlBody,
+						src_and_metadata.revision.revid, true, null,
+						function (wtBody) {
+							roundTripDiff(env, env.page.src, htmlBody, wtBody,
+								rtSelserTest.bind(null, htmlBody));
+						});
+				});
 			}
 		} );
 	};

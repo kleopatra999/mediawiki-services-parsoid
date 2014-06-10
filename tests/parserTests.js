@@ -428,7 +428,7 @@ ParserTests.prototype.convertHtml2Wt = function( options, mode, item, doc, proce
 		self = this,
 		startsAtWikitext = mode === 'wt2wt' || mode === 'wt2html' || mode === 'selser';
 	try {
-		this.env.page.dom = item.cachedHTMLStr ? DU.parseHTML(item.cachedHTMLStr).body : null;
+		this.env.page.dom = item.cachedDOM ? item.cachedDOM.body : null;
 		if ( mode === 'selser' ) {
 			// console.warn("--> selsering: " + content.outerHTML);
 			this.env.setPageSrcInfo( item.wikitext );
@@ -516,6 +516,7 @@ ParserTests.prototype.applyChanges = function ( item, content, changelist, cb ) 
 			case 'OL':
 			case 'UL': wrapperName = 'LI'; break;
 			case 'DL': wrapperName = 'DD'; break;
+			case 'BODY' : wrapperName = 'P'; break;
 
 			case 'TR':
 				var prev = DU.getPrevElementSibling(n);
@@ -636,9 +637,9 @@ ParserTests.prototype.applyChanges = function ( item, content, changelist, cb ) 
 	if (this.env.conf.parsoid.dumpFlags &&
 		this.env.conf.parsoid.dumpFlags.indexOf("dom:post-changes") !== -1)
 	{
-		console.warn("Change tree: " + JSON.stringify(item.changes));
+		console.warn("Change tree : " + JSON.stringify(item.changes));
 		console.warn("-------------------------");
-		console.warn("DOM with changes applied: " + content.outerHTML);
+		console.warn("Edited DOM  : " + content.outerHTML);
 		console.warn("-------------------------");
 	}
 
@@ -669,10 +670,11 @@ ParserTests.prototype.generateChanges = function( options, item, content, cb ) {
 	 * If no node in the DOM subtree rooted at 'node' is editable in the VE,
 	 * this function should return false.
 	 *
-	 * Currently true for template and extension content.
+	 * Currently true for template and extension content, and for entities.
 	 */
 	function domSubtreeIsEditable(env, node) {
-		return !DU.isTplElementNode(env, node);
+		return !DU.isTplElementNode(env, node) &&
+			!(DU.isElt(node) && node.getAttribute("typeof") === "mw:Entity");
 	}
 
 	/**
@@ -935,17 +937,29 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 
 	// First conversion stage
 	if ( startsAtWikitext ) {
-		if ( item.cachedHTMLStr === null ) {
+	    // Always serialize DOM to string and reparse before passing to wt2wt
+		if ( item.cachedDOM === null ) {
 			testTasks.push( this.convertWt2Html.bind( this, mode, item.wikitext ) );
-			// Caching stage 1 - save the result of the first two stages so we can maybe skip them later
+			// Caching stage 1 - save the result of the first two stages
+			// so we can maybe skip them later
 			testTasks.push( function ( result, cb ) {
 				// Cache parsed HTML
-				item.cachedHTMLStr = DU.serializeNode(result);
-				cb( null, result );
+				item.cachedDOM = DU.parseHTML(DU.serializeNode(result));
+
+				// - In wt2html mode, pass through original DOM
+				//   so that it is serialized just once.
+				// - In wt2wt and selser modes, pass through serialized and
+				//   reparsed DOM so that fostering/normalization effects
+				//   are reproduced.
+				if (mode === "wt2html") {
+					cb(null, result);
+				} else {
+					cb(null, item.cachedDOM.body.cloneNode(true));
+				}
 			} );
 		} else {
 			testTasks.push( function ( cb ) {
-				cb( null, DU.parseHTML(item.cachedHTMLStr) );
+				cb(null, item.cachedDOM.body.cloneNode(true));
 			} );
 		}
 	} else if ( startsAtHtml ) {
@@ -976,11 +990,7 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 		} );
 	}
 
-	// Always serialize DOM to string and reparse before passing to wt2wt
 	if (mode === 'wt2wt') {
-		testTasks.push( function ( doc, cb ) {
-			cb( null, DU.parseHTML(DU.serializeNode(doc)).body);
-		} );
 		// handle a 'changes' option if present.
 		if (item.options.parsoid && item.options.parsoid.changes) {
 			testTasks.push( function( doc, cb ) {
@@ -1602,15 +1612,21 @@ ParserTests.prototype.main = function ( options, popts ) {
 
 	options.expandExtensions = true;
 
-	var i, key, parsoidConfig = new ParsoidConfig( null, options ),
+	var i, key,
+		parsoidConfig = new ParsoidConfig( null, options ),
 		iwmap = Object.keys( parsoidConfig.interwikiMap );
+
+	// Set tracing and debugging before the env. object is
+	// constructed since tracing backends are registered there.
+	// (except for the --quiet option where the backends are
+	// overridden here).
+	Util.setDebuggingFlags(parsoidConfig, options);
 	Util.setTemplatingAndProcessingFlags( parsoidConfig, options );
 
 	for ( i = 0; i < iwmap.length; i++ ) {
 		key = iwmap[i];
 		parsoidConfig.interwikiMap[key] = mockAPIServerURL;
 	}
-
 
 	// Create a new parser environment
 	MWParserEnvironment.getParserEnv( parsoidConfig, null, 'enwiki', null, null, function ( err, env ) {
@@ -1620,7 +1636,7 @@ ParserTests.prototype.main = function ( options, popts ) {
 
 		if (booleanOption( options.quiet )) {
 			var logger = new Logger(env);
-			parsoidConfig.registerLoggingBackends(["fatal", "error"], logger);
+			Util.registerLoggingBackends(["fatal", "error"], logger, parsoidConfig);
 			env.setLogger(logger);
 		}
 
@@ -1631,7 +1647,6 @@ ParserTests.prototype.main = function ( options, popts ) {
 		this.env.conf.wiki.addExtensionTag("ref");
 		this.env.conf.wiki.addExtensionTag("references");
 
-		Util.setDebuggingFlags( this.env.conf.parsoid, options );
 		options.modes = [];
 		if ( options.wt2html ) {
 			options.modes.push( 'wt2html' );
@@ -1722,7 +1737,7 @@ ParserTests.prototype.buildTasks = function ( item, modes, options ) {
 							}
 
 							// Push the caches forward!
-							item.cachedHTMLStr = newitem.cachedHTMLStr;
+							item.cachedDOM = newitem.cachedDOM;
 							item.cachedNormalizedHTML = newitem.cachedNormalizedHTML;
 
 							setImmediate( cb );
@@ -1761,14 +1776,17 @@ ParserTests.prototype.processCase = function ( i, options, err ) {
 		if ( 'result' in item ) { item.html = item.result; delete item.result; }
 
 		// html/* and html/parsoid should be treated as html.
-		if ( 'html/*' in item ) { item.html = item['html/*']; }
-		if ( 'html/parsoid' in item ) { item.html = item['html/parsoid']; }
+		[ 'html/*', 'html/*+tidy', 'html+tidy', 'html/parsoid' ].forEach(function(alt) {
+			if (alt in item) {
+				item.html = item[alt];
+			}
+		});
 		// ensure that test is not skipped if it has a wikitext/edited section
 		if ( 'wikitext/edited' in item) { item.html = true; }
 
 		// Reset the cached results for the new case.
 		// All test modes happen in a single run of processCase.
-		item.cachedHTMLStr = null;
+		item.cachedDOM = null;
 		item.cachedNormalizedHTML = null;
 
 		//console.log( 'processCase ' + i + JSON.stringify( item )  );
@@ -1832,12 +1850,67 @@ ParserTests.prototype.processCase = function ( i, options, err ) {
 							wikiConf.wgScriptPath = '/';
 							wikiConf.script = '/index.php';
 							wikiConf.articlePath = '/wiki/$1';
-							// this has been updated in the live wikis, but the parser tests
-							// expect the old value (as set in parserTest.inc:setupDatabase())
-							wikiConf.interwikiMap.meatball =
-								Util.clone(wikiConf.interwikiMap.meatball);
-							wikiConf.interwikiMap.meatball.url =
-								'http://www.usemod.com/cgi-bin/mb.pl?$1';
+							// Hard-code some interwiki prefixes, as is done
+							// in parserTest.inc:setupInterwikis()
+							var iwl = {
+								wikipedia: {
+									url: 'http://en.wikipedia.org/wiki/$1'
+								},
+								meatball: {
+									// this has been updated in the live wikis, but the parser tests
+									// expect the old value (as set in parserTest.inc:setupInterwikis())
+									url: 'http://www.usemod.com/cgi-bin/mb.pl?$1'
+								},
+								memoryalpha: {
+									url: 'http://www.memory-alpha.org/en/index.php/$1'
+								},
+								zh: {
+									prefix: 'zh',
+									url: 'http://zh.wikipedia.org/wiki/$1',
+									language: '\u4e2d\u6587',
+									protorel: true
+								},
+								es: {
+									prefix: 'es',
+									url: 'http://es.wikipedia.org/wiki/$1',
+									language: 'espa\u00f1ol',
+									protorel: true
+								},
+								fr: {
+									prefix: 'fr',
+									url: 'http://fr.wikipedia.org/wiki/$1',
+									language: 'fran\u00e7ais',
+									protorel: true
+								},
+								ru: {
+									prefix: 'ru',
+									url: 'http://ru.wikipedia.org/wiki/$1',
+									language: '\u0440\u0443\u0441\u0441\u043a\u0438\u0439',
+									protorel: true
+								},
+								// not in PHP setupInterwikis(), but needed
+								en: {
+									prefix: 'en',
+									url: 'http://en.wikipedia.org/wiki/$1',
+									language: 'English',
+									protorel: true
+								},
+								ko: {
+									prefix: 'ko',
+									url: 'http://ko.wikipedia.org/wiki/$1',
+									language: '\ud55c\uad6d\uc5b4',
+									protorel: true
+								}
+							};
+							Object.keys(iwl).forEach(function(key) {
+								wikiConf.interwikiMap[key] =
+									wikiConf.interwikiMap[key] ?
+									Util.clone(wikiConf.interwikiMap[key]) :
+									{};
+								Object.keys(iwl[key]).forEach(function(f) {
+									wikiConf.interwikiMap[key][f] = iwl[key][f];
+								});
+							});
 							// Add 'MemoryAlpha' namespace (bug 51680)
 							this.env.conf.wiki.namespaceNames['100'] = 'MemoryAlpha';
 							this.env.conf.wiki.namespaceIds.memoryalpha =

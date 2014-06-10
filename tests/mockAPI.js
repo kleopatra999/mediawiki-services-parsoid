@@ -22,6 +22,9 @@ var FILE_PROPS = {
 	},
 	'Foobar.mov': {
 		size: 12345, width: 640, height: 480, bits: 8, mime: 'video/quicktime', mediatype: 'VIDEO'
+	},
+	'LoremIpsum.djvu': {
+		size: 3249, width: 2480, height: 3508, bits: 8, mime: 'image/vnd.djvu'
 	}
 };
 

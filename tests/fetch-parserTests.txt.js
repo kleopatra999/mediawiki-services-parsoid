@@ -11,9 +11,9 @@
 //     and update these hashes automatically.
 //
 // You can use 'sha1sum -b tests/parser/parserTests.txt' to compute this value:
-var expectedSHA1 = "13ae5bc490f84a773c9b665d4c1f13f3439d9c3c";
+var expectedSHA1 = "06efe4a9a7f5f6846e7c3127eaf0ce76dcf4f37c";
 // git log --pretty=oneline -1 tests/parser/parserTests.txt
-var latestCommit = "85d4e39ff096d05386fd2f333cd6acea66ad6f90";
+var latestCommit = "d4bc99e7eda74bd6e820195a6fe886dc0f391719";
 
 var fs = require('fs'),
 	path = require('path'),
