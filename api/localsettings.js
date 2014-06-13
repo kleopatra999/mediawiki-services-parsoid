@@ -8,5 +8,5 @@
 
 exports.setup = function( parsoidConfig ) {
 	parsoidConfig.useSelser = true;
-	parsoidConfig.maxRequestsPerChild = 1;
+	parsoidConfig.maxRequestsPerChild = 100;
 };
