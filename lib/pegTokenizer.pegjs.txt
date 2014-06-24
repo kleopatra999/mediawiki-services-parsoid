@@ -1667,7 +1667,6 @@ table_lines
     (! inline_breaks / & '{{!}}' )
     r:(
         & { return stops.push('table', true); }
-        cs:(comment / space)*
         tl:table_line
         tls:(
             nls:optionalNewlines
@@ -1677,14 +1676,14 @@ table_lines
         {
             stops.pop('table');
             //console.warn('table_lines: ' + pp(tl.concat(tls)));
-            return cs.concat( tl, tls );
+            return tl.concat( tls );
         }
       / & { return stops.pop('table'); }
     ) { return r; }
 
 // This production assumes start-of-line position!
 table_line
-  = space* (table_start_tag
+  = (space / comment)* (table_start_tag
   / table_heading_tags
   / table_row_tag
   / table_data_tags
@@ -2017,7 +2016,7 @@ optionalNewlines
         }
     }
 
-sol = empty_line_with_comments / normal_sol
+sol = (empty_line_with_comments / sol_prefix) sol_rest
 
 sol_prefix
   = newlineToken
@@ -2028,9 +2027,7 @@ sol_prefix
       return peg$currPos === 0 && options.pegTokenizer.savedSOL !== false;
   } { return []; }
 
-// Start of line
-normal_sol
-  = nl:sol_prefix
+sol_rest =
     // Eat multi-line comment, so that syntax after still matches as if it
     // was actually preceded by a newline
     cn:( c:comment n:newlineToken? {
@@ -2061,7 +2058,7 @@ normal_sol
             cn = [];
         }
 
-        return nl.concat(cn, niToken);
+        return cn.concat(niToken);
     }
 
 empty_line_with_comments

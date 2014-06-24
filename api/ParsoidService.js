@@ -568,7 +568,6 @@ function ParsoidService(options) {
 	}
 
 	function wt2html( req, res, wt ) {
-
 		var env = res.local('env');
 		var prefix = res.local('iwp');
 		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
