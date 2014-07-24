@@ -678,6 +678,9 @@ function ParsoidService(options) {
 
 	// Regular article parsing
 	app.get( new RegExp( '/(' + getUriRE() + ')/(.*)' ), interParams, parserEnvMw, function(req, res) {
+		if ( newrelic ) {
+			newrelic.setTransactionName( 'wt2html' );
+		}
 		wt2html( req, res );
 	});
 
@@ -685,8 +688,14 @@ function ParsoidService(options) {
 	app.post( new RegExp( '/(' + getUriRE() + ')/(.*)' ), interParams, parserEnvMw, function ( req, res ) {
 		// parse html or wt
 		if ( req.body.wt ) {
+			if ( newrelic ) {
+				newrelic.setTransactionName( 'wt2html' );
+			}
 			wt2html( req, res, req.body.wt );
 		} else {
+			if ( newrelic ) {
+				newrelic.setTransactionName( 'html2wt' );
+			}
 			html2wt( req, res, req.body.html || req.body.content || '' );
 		}
 	});
