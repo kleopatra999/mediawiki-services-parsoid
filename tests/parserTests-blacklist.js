@@ -488,7 +488,7 @@ add("wt2wt", "<nowiki> and <pre> preference (first one wins)", "<pre>\n<nowiki>\
 add("wt2wt", "Templates: Indent-Pre: 1f: Wrapping should be based on expanded content", "{{echo| }}a\n\n{{echo|\n }}a\n\n{{echo|\n b}}\n\n{{echo|a\n }}b\n\n{{echo|a\n}}\n b\n");
 add("wt2wt", "Templates: Handle comments in the target", "{{echo\n<!-- should be ignored -->\n|foo}}\n\n{{echo<!-- should be ignored -->\n|foo}}\n\n{{echo<!-- should be ignored -->|foo}}\n\n{{echo|foo}}");
 add("wt2wt", "2f. Indent-pre started by table-line syntax", "a\n<nowiki> </nowiki><nowiki>| b\n | c</nowiki>");
-add("wt2wt", "4. Indent-Pre and extension tags", " a <gallery>\n File:foobar.jpg\n </gallery>\n");
+add("wt2wt", "Gallery with wikitext inside caption");
 add("wt2wt", "Leading pipes outside of tables 2", "a\n| foo\n\nb\n");
 add("wt2wt", "Leading pipes outside of tables 3", "a\n| class=\"foo bar\" | baz\n\nb\n");
 add("wt2wt", "Definition lists: self-closed tag", ";one<br />two : two-line fun");
