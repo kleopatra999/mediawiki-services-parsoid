@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 "use strict";
+require( '../lib/core-upgrade.js' );
 
 var	request = require( 'request' ),
 	yargs = require( 'yargs' ),
 	domino = require( 'domino' ),
 	url = require( 'url' ),
 	zlib = require( 'zlib' ),
+	JSUtils = require( '../lib/jsutils.js' ).JSUtils,
 	Util = require( '../lib/mediawiki.Util.js' ).Util,
 	DU = require( '../lib/mediawiki.DOMUtils.js' ).DOMUtils,
 	TemplateRequest = require( '../lib/mediawiki.ApiRequest.js' ).TemplateRequest,
@@ -436,8 +438,13 @@ var parsoidPost = function (env, parsoidURL, prefix, title, text, oldid,
 		data.wt = text;
 	}
 
+	// make sure parsoidURL ends on /
+	if ( !/\/$/.test(parsoidURL) ) {
+		parsoidURL += '/';
+	}
+
 	var options = {
-		uri: parsoidURL + '/' + prefix + '/' + encodeURI(title),
+		uri: parsoidURL + prefix + '/' + encodeURI(title),
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/x-www-form-urlencoded',
@@ -527,8 +534,9 @@ var selserRoundTripDiff = function (env, html, out, diffs, cb) {
 	});
 };
 
-var fetch = function ( page, cb, options ) {
-	cb = typeof cb === 'function' ? cb : function () {};
+// Returns a Promise for an { env, rtDiffs } object.  `cb` is optional.
+var fetch = function ( page, options, cb ) {
+	cb = JSUtils.mkPromised( cb, [ 'env', 'rtDiffs' ] );
 	var prefix = options.prefix || 'enwiki';
 
 	if ( options.apiURL ) {
@@ -614,7 +622,8 @@ var fetch = function ( page, cb, options ) {
 		Util.setDebuggingFlags( parsoidConfig, options );
 	}
 
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, prefix, page, null, envCb );
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, { prefix: prefix, pageName: page }, envCb );
+	return cb.promise;
 };
 
 var cbCombinator = function ( formatter, cb, err, env, text ) {
@@ -678,17 +687,13 @@ if ( !module.parent ) {
 			// TODO: This will not be necessary once we have a top-level testing
 			// script that takes care of setting everything up.
 			var apiServer = require( './apiServer.js' );
-			apiServer.startParsoidServer({quiet: true}, function( url ) {
-				argv.parsoidURL = url;
-				fetch( title, callback, argv );
-			} );
+			apiServer.startParsoidServer({ quiet: true }).then(function( ret ) {
+				argv.parsoidURL = ret.url;
+				fetch( title, argv, callback );
+			} ).done();
 			apiServer.exitOnProcessTerm();
 		} else {
-			// make sure parsoidURL ends on /
-			if (!/\/$/.test(argv.parsoidURL)) {
-				argv.parsoidURL += '/';
-			}
-			fetch( title, callback, argv );
+			fetch( title, argv, callback );
 		}
 	} else {
 		opts.showHelp();

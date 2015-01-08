@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 "use strict";
+require( '../lib/core-upgrade.js' );
 var DOMDiff = require('../lib/mediawiki.DOMDiff.js').DOMDiff,
 	Util = require('../lib/mediawiki.Util.js').Util,
 	DU = require('../lib/mediawiki.DOMUtils.js').DOMUtils,
-	Logger = require('../lib/Logger.js').Logger,
+	ParsoidLogger = require('../lib/ParsoidLogger.js').ParsoidLogger,
 	yargs = require('yargs'),
 	fs = require('fs');
 
@@ -50,14 +51,13 @@ if (Util.booleanOption( argv.help ) || !oldhtml || !newhtml) {
 }
 
 var dummyEnv = {
-	conf: { parsoid: { debug: Util.booleanOption( argv.debug ) } },
-	page: { id: null },
-	isParsoidObjectId: function() { return true; }
+	conf: { parsoid: { debug: Util.booleanOption( argv.debug ) }, wiki: {} },
+	page: { id: null }
 };
 
 if (argv.debug) {
-	var logger = new Logger(dummyEnv);
-	logger.registerTracer(/^(trace|debug)(\/|$)/);
+	var logger = new ParsoidLogger(dummyEnv);
+	logger.registerBackend(/^(trace|debug)(\/|$)/, logger.getDefaultTracerBackend());
 	dummyEnv.log = logger.log.bind(logger);
 } else {
 	dummyEnv.log = function() {};
@@ -67,7 +67,7 @@ var dd = new DOMDiff(dummyEnv),
 	oldDOM = DU.parseHTML(oldhtml),
 	newDOM = DU.parseHTML(newhtml);
 
-dd.doDOMDiff(oldDOM, newDOM);
+dd.doDOMDiff(oldDOM.body, newDOM.body);
 if ( !Util.booleanOption( argv.quiet ) ) {
 	console.warn("----- DIFF-marked DOM -----");
 }

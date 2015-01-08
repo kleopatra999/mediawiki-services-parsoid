@@ -5,14 +5,13 @@
  * This pulls all the parserTests.txt items and runs them through Parsoid.
  */
 "use strict";
+require( '../lib/core-upgrade.js' );
 
 /**
  * @class ParserTestModule
  * @private
  * @singleton
  */
-
-require('../lib/core-upgrade.js');
 
 var apiServer = require( './apiServer.js' ),
 	async = require( 'async' ),
@@ -24,7 +23,7 @@ var apiServer = require( './apiServer.js' ),
 	yargs = require('yargs'),
 	Alea = require('alea'),
 	DU = require('../lib/mediawiki.DOMUtils.js').DOMUtils,
-	Logger = require('../lib/Logger.js').Logger,
+	ParsoidLogger = require('../lib/ParsoidLogger.js').ParsoidLogger,
 	PEG = require('pegjs'),
 	Util = require( '../lib/mediawiki.Util.js' ).Util,
 	Diff = require('../lib/mediawiki.Diff.js').Diff;
@@ -199,10 +198,7 @@ ParserTests.prototype.getOpts = function () {
 		},
 		'run-disabled': {
 			description: 'Run disabled tests',
-			// this defaults to true because historically parsoid-only tests
-			// were marked as 'disabled'.  Once these are all changed to
-			// 'parsoid', this default should be changed to false.
-			'default': true,
+			'default': false,
 			'boolean': true
 		},
 		'run-php': {
@@ -440,7 +436,10 @@ ParserTests.prototype.convertHtml2Wt = function( options, mode, item, doc, proce
 
 		serializer.serializeDOM( content, function ( res ) {
 			wt += res;
-		}, function () {
+		}, false, function(err) {
+			if (err) {
+				self.env.log("fatal", err);
+			}
 			processWikitextCB( null, wt );
 			self.env.setPageSrcInfo( null );
 			self.env.page.dom = null;
@@ -516,8 +515,6 @@ ParserTests.prototype.applyChanges = function ( item, content, changelist, cb ) 
 			case 'OL':
 			case 'UL': wrapperName = 'LI'; break;
 			case 'DL': wrapperName = 'DD'; break;
-			case 'BODY' : wrapperName = 'P'; break;
-
 			case 'TR':
 				var prev = DU.getPrevElementSibling(n);
 				if (prev) {
@@ -531,6 +528,12 @@ ParserTests.prototype.applyChanges = function ( item, content, changelist, cb ) 
 					} else {
 						wrapperName = 'TD';
 					}
+				}
+				break;
+			case 'BODY' : wrapperName = 'P'; break;
+			default:
+				if (DU.isBlockNodeWithVisibleWT(n)) {
+					wrapperName = 'P';
 				}
 				break;
 		}
@@ -673,7 +676,7 @@ ParserTests.prototype.generateChanges = function( options, item, content, cb ) {
 	 * Currently true for template and extension content, and for entities.
 	 */
 	function domSubtreeIsEditable(env, node) {
-		return !DU.isTplElementNode(env, node) &&
+		return !DU.isTplOrExtToplevelNode(node) &&
 			!(DU.isElt(node) && node.getAttribute("typeof") === "mw:Entity");
 	}
 
@@ -788,6 +791,10 @@ ParserTests.prototype.applyManualChanges = function( document, changes, cb ) {
 	//  [x,y,z...] becomes $(x)[y](z....)
 	// that is, ['fig', 'attr', 'width', '120'] is interpreted as
 	//   $('fig').attr('width', '120')
+	// See http://api.jquery.com/ for documentation of these methods.
+	// "contents" as second argument calls the jquery .contents() method
+	// on the results of the selector in the first argument, which is
+	// a good way to get at the text and comment nodes
 	var jquery = {
 		attr: function(name, val) {
 			this.setAttribute(name, val);
@@ -803,6 +810,24 @@ ParserTests.prototype.applyManualChanges = function( document, changes, cb ) {
 		},
 		text: function(t) {
 			this.textContent = t;
+		},
+		remove: function(optSelector) {
+			// jquery lets us specify an optional selector to further
+			// restrict the removed elements.
+			// text nodes don't have the "querySelectorAll" method, so
+			// just include them by default (jquery excludes them, which
+			// is less useful)
+			var what = !optSelector ? [ this ] :
+				!DU.isElt(this) ? [ this ] /* text node hack! */ :
+				this.querySelectorAll(optSelector);
+			Array.prototype.forEach.call(what, function(node) {
+				if (node.parentNode) { node.parentNode.removeChild(node); }
+			});
+		},
+		empty: function() {
+			while (this.firstChild) {
+				this.removeChild(this.firstChild);
+			}
 		}
 	};
 
@@ -818,6 +843,13 @@ ParserTests.prototype.applyManualChanges = function( document, changes, cb ) {
 			err = new Error(change[0]+' did not match any elements: ' +
 							document.outerHTML);
 			return;
+		}
+		if (change[1] === 'contents') {
+			change.shift();
+			els = Array.prototype.reduce.call(els, function(acc, el) {
+				acc.push.apply(acc, el.childNodes);
+				return acc;
+			}, []);
 		}
 		var fun = jquery[change[1]];
 		if (!fun) {
@@ -885,11 +917,11 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 			title = this.env.normalizeTitle( title, true );
 			// This sets the page name as well as the relative link prefix
 			// for the rest of the parse.
-			this.env.reset( title );
+			this.env.initializeForPageName( title );
 		} else {
-			// Since we are reusing the 'env' object, set it to Main Page
+			// Since we are reusing the 'env' object, set it to the default
 			// so that relative link prefix is back to "./"
-			this.env.reset( "Main Page" );
+			this.env.initializeForPageName( this.env.defaultPageName );
 		}
 
 		if ( item.options.subpage !== undefined ) {
@@ -1028,7 +1060,7 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 ParserTests.prototype.processParsedHTML = function( item, options, mode, doc, cb ) {
 	item.time.end = Date.now();
 	// Check the result vs. the expected result.
-	var checkPassed = this.checkHTML( item, DU.serializeChildren(doc), options, mode );
+	var checkPassed = this.checkHTML( item, doc, options, mode );
 
 	// Now schedule the next test, if any
 	// Only pass an error if --exit-unexpected was set and there was an error
@@ -1319,7 +1351,7 @@ function printResult( reportFailure, reportSuccess, title, time, comments, iopts
 	if ( fail &&
 	     booleanOption( options.whitelist ) &&
 	     title in testWhiteList &&
-	     DU.normalizeOut( testWhiteList[title], parsoidOnly ) ===  actual.normal ) {
+	     DU.normalizeOut( DU.parseHTML( testWhiteList[title] ).body, parsoidOnly ) ===  actual.normal ) {
 		whitelist = true;
 		fail = false;
 	}
@@ -1362,10 +1394,11 @@ ParserTests.prototype.checkHTML = function ( item, out, options, mode ) {
 		('html/parsoid' in item) || (item.options.parsoid !== undefined);
 
 	normalizedOut = DU.normalizeOut( out, parsoidOnly );
+	out = DU.serializeChildren(out);
 
 	if ( item.cachedNormalizedHTML === null ) {
 		if ( parsoidOnly ) {
-			var normalDOM = DU.serializeChildren(DU.parseHTML( item.html ).body);
+			var normalDOM = DU.parseHTML( item.html ).body;
 			normalizedExpected = DU.normalizeOut( normalDOM, parsoidOnly );
 		} else {
 			normalizedExpected = DU.normalizeHTML( item.html );
@@ -1433,6 +1466,9 @@ ParserTests.prototype.reportSummary = function ( stats ) {
 
 	console.log( "==========================================================");
 	console.log( "SUMMARY: ");
+	if (console.time && console.timeEnd) {
+		console.timeEnd('Execution time');
+	}
 
 	if( failTotalTests !== 0 ) {
 		for ( i = 0; i < modes.length; i++ ) {
@@ -1614,7 +1650,7 @@ ParserTests.prototype.main = function ( options, popts ) {
 
 	var i, key,
 		parsoidConfig = new ParsoidConfig( null, options ),
-		iwmap = Object.keys( parsoidConfig.interwikiMap );
+		iwmap = parsoidConfig.interwikiMap.keys();
 
 	// Set tracing and debugging before the env. object is
 	// constructed since tracing backends are registered there.
@@ -1625,18 +1661,18 @@ ParserTests.prototype.main = function ( options, popts ) {
 
 	for ( i = 0; i < iwmap.length; i++ ) {
 		key = iwmap[i];
-		parsoidConfig.interwikiMap[key] = mockAPIServerURL;
+		parsoidConfig.interwikiMap.set(key, mockAPIServerURL);
 	}
 
 	// Create a new parser environment
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, 'enwiki', null, null, function ( err, env ) {
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, { prefix: 'enwiki' }, function( err, env ) {
 		// For posterity: err will never be non-null here, because we expect the WikiConfig
 		// to be basically empty, since the parserTests environment is very bare.
 		this.env = env;
 
 		if (booleanOption( options.quiet )) {
-			var logger = new Logger(env);
-			Util.registerLoggingBackends(["fatal", "error"], logger, parsoidConfig);
+			var logger = new ParsoidLogger(env);
+			logger.registerLoggingBackends(["fatal", "error"], parsoidConfig);
 			env.setLogger(logger);
 		}
 
@@ -1669,6 +1705,9 @@ ParserTests.prototype.main = function ( options, popts ) {
 			this.parserPipeline = this.env.pipelineFactory.getPipeline('text/x-mediawiki/full');
 		}
 
+		if (console.time && console.timeEnd) {
+			console.time('Execution time');
+		}
 		options.reportStart();
 		this.env.pageCache = this.articles;
 		this.comments = [];
@@ -1799,9 +1838,10 @@ ParserTests.prototype.processCase = function ( i, options, err ) {
 				case 'test':
 					if( !('wikitext' in item && 'html' in item) ||
 						('disabled' in item.options && !this.runDisabled) ||
-						('php' in item.options && !('html/parsoid' in item || this.runPHP)) ||
-					    (this.test_filter &&
-					     -1 === item.title.search( this.test_filter ) ) ) {
+						('php' in item.options &&
+							!('html/parsoid' in item || this.runPHP)) ||
+						(this.test_filter &&
+							-1 === item.title.search( this.test_filter ) ) ) {
 						// Skip test whose title does not match --filter
 						// or which is disabled or php-only
 						this.comments = [];
@@ -1853,6 +1893,10 @@ ParserTests.prototype.processCase = function ( i, options, err ) {
 							// Hard-code some interwiki prefixes, as is done
 							// in parserTest.inc:setupInterwikis()
 							var iwl = {
+								local: {
+									url: 'http://doesnt.matter.org/$1',
+									localinterwiki: ''
+								},
 								wikipedia: {
 									url: 'http://en.wikipedia.org/wiki/$1'
 								},
@@ -1865,50 +1909,55 @@ ParserTests.prototype.processCase = function ( i, options, err ) {
 									url: 'http://www.memory-alpha.org/en/index.php/$1'
 								},
 								zh: {
-									prefix: 'zh',
 									url: 'http://zh.wikipedia.org/wiki/$1',
 									language: '\u4e2d\u6587',
-									protorel: true
+									local: ''
 								},
 								es: {
-									prefix: 'es',
 									url: 'http://es.wikipedia.org/wiki/$1',
 									language: 'espa\u00f1ol',
-									protorel: true
+									local: ''
 								},
 								fr: {
-									prefix: 'fr',
 									url: 'http://fr.wikipedia.org/wiki/$1',
 									language: 'fran\u00e7ais',
-									protorel: true
+									local: ''
 								},
 								ru: {
-									prefix: 'ru',
 									url: 'http://ru.wikipedia.org/wiki/$1',
 									language: '\u0440\u0443\u0441\u0441\u043a\u0438\u0439',
-									protorel: true
+									local: ''
+								},
+								mi: {
+									url: 'http://mi.wikipedia.org/wiki/$1',
+									// better for testing if one of the
+									// localinterwiki prefixes is also a
+									// language
+									language: 'Test',
+									local: '',
+									localinterwiki: ''
+								},
+								mul: {
+									url: 'http://wikisource.org/wiki/$1',
+									extralanglink: '',
+									linktext: 'Multilingual',
+									sitename: 'WikiSource',
+									local: ''
 								},
 								// not in PHP setupInterwikis(), but needed
 								en: {
-									prefix: 'en',
 									url: 'http://en.wikipedia.org/wiki/$1',
 									language: 'English',
-									protorel: true
-								},
-								ko: {
-									prefix: 'ko',
-									url: 'http://ko.wikipedia.org/wiki/$1',
-									language: '\ud55c\uad6d\uc5b4',
-									protorel: true
+									local: '',
+									protorel: ''
 								}
 							};
+							wikiConf.interwikiMap.clear();
 							Object.keys(iwl).forEach(function(key) {
-								wikiConf.interwikiMap[key] =
-									wikiConf.interwikiMap[key] ?
-									Util.clone(wikiConf.interwikiMap[key]) :
-									{};
+								iwl[key].prefix = key;
+								wikiConf.interwikiMap.set(key, {});
 								Object.keys(iwl[key]).forEach(function(f) {
-									wikiConf.interwikiMap[key][f] = iwl[key][f];
+									wikiConf.interwikiMap.get(key)[f] = iwl[key][f];
 								});
 							});
 							// Add 'MemoryAlpha' namespace (bug 51680)
@@ -2191,9 +2240,9 @@ if ( popts.argv.help ) {
 }
 
 // Start the mock api server and kick off parser tests
-apiServer.startMockAPIServer({ quiet: popts.quiet, port: 7001 }, function(url, server) {
-	mockAPIServerURL = url;
-	mockAPIServer = server;
-	ptests.main(popts.argv, popts);
-});
+apiServer.startMockAPIServer({ quiet: popts.quiet }).then(function( ret ) {
+	mockAPIServerURL = ret.url;
+	mockAPIServer = ret.child;
+	return ptests.main(popts.argv, popts);
+}).done();
 apiServer.exitOnProcessTerm();

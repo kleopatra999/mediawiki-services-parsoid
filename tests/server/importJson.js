@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 "use strict";
+require('../../lib/core-upgrade.js');
+
 /**
  * A utility for reading in a JSON-y list of articles to the database.
  */
@@ -33,7 +35,7 @@ var opts = yargs.usage( 'Usage: ./importJson.js titles.example.json' )
 	.options( 'prefix', {
 			description: 'Which wiki prefix to use; e.g. "en" for English wikipedia, "es" for Spanish, "mw" for mediawiki.org',
 			'boolean': false,
-			'default': 'en'
+			'default': 'enwiki'
 	} )
 	.options( 'h', {
 		alias: 'host',

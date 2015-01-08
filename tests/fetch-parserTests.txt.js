@@ -3,6 +3,7 @@
  * Fetch new parserTests.txt from upstream mediawiki/core.
  */
 "use strict";
+require( '../lib/core-upgrade.js' );
 
 // UPDATE THESE when upstream mediawiki/core includes new parsoid-relevant tests
 // This ensures that our whitelist/blacklist is in sync.
@@ -11,9 +12,9 @@
 //     and update these hashes automatically.
 //
 // You can use 'sha1sum -b tests/parser/parserTests.txt' to compute this value:
-var expectedSHA1 = "7bce9a83bbd36b23758ddcd5847ad2df2bf2ff0b";
+var expectedSHA1 = "3f16e1b7902a4f5ba1403f074d22b660b9e00617";
 // git log --pretty=oneline -1 tests/parser/parserTests.txt
-var latestCommit = "9b8c1fe24a120d679449dd80819c982968b8d446";
+var latestCommit = "4bff1ccc98b96a88e7bbb744eafecc91ec23c146";
 
 var fs = require('fs'),
 	path = require('path'),
