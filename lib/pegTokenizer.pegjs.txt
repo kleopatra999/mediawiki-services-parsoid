@@ -25,19 +25,13 @@
     var inline_breaks = tu.inline_breaks;
     var stops = new tu.SyntaxStops();
 
-    // Current extension/include tag being parsed.
-    var currExtTag = null;
-
-    // text start position
-    var textStart = 0;
-
     /*
      * Emit a chunk of tokens to our consumers.  Once this has been done, the
      * current expression can return an empty list (true).
      */
     var emitChunk = function (tokens) {
-        // shift tsr of all tokens by offset
-        Util.shiftTokenTSR(tokens, options.srcOffset);
+        // Shift tsr of all tokens by the pipeline offset
+        Util.shiftTokenTSR( tokens, options.pipelineOffset );
         options.env.log("trace/peg", options.pegTokenizer.pipelineId, "---->  ", tokens);
         // limit the size of individual chunks
         var chunkLimit = 100000;
@@ -105,11 +99,8 @@ redirect
 /* The 'redirect' magic word.
  * The leading whitespace allowed is due to the PHP trim() function.
  */
-redirect_word = sp:[ \t\n\r\0\x0b]* rw:((!space_or_newline ![:\[] c:.{return c;})+)
+redirect_word = sp:[ \t\n\r\0\x0b]* rw:(!space_or_newline ![:\[] c:.{return c;})+
 {
-    if ( !rw ) {
-        rw = "";
-    }
     rw = rw.join('');
     if ( options.env.conf.wiki.getMagicWordMatcher( 'redirect' ).test( rw ) ) {
         return sp.join('') + rw;
@@ -128,16 +119,12 @@ redirect_word = sp:[ \t\n\r\0\x0b]* rw:((!space_or_newline ![:\[] c:.{return c;}
  */
 toplevelblock =
   tlb save_sol_state {
-        var parsedInput = input.substring(0, peg$currPos),
-            newInput = input.substring(peg$currPos),
-            newOffset = (options.srcOffset || 0) + peg$currPos;
+        var newOffset = peg$currPos;
 
         // Trick the tokenizer into ending parsing
-        input = parsedInput;
+        peg$currPos = input.length;
 
-        // console.warn("Yield @pos: " + newOffset + "; input len: " + newInput.length);
-
-        return { eof: false, newInput: newInput, newOffset: newOffset };
+        return { eof: false, newOffset: newOffset };
   }
   / newline* eof {
         // Clear saved sol state!
@@ -149,8 +136,7 @@ toplevelblock =
   }
 
 save_sol_state =
-    & sol { options.pegTokenizer.savedSOL = true; return true; }
-  / &     { options.pegTokenizer.savedSOL = false; return true; }
+  & (s:sol? { options.pegTokenizer.savedSOL = !!s; return true; })
 
 /*
  * A document (start production) is a sequence of toplevelblocks. Tokens are
@@ -161,12 +147,12 @@ tlb
     // Clear the tokenizer's backtracking cache after matching each
     // toplevelblock. There won't be any backtracking as a document is just a
     // sequence of toplevelblocks, so the cache for previous toplevelblocks
-    // will never be needed. This frees up a lot of memory: In the case of
-    // [[:en:Barack Obama]], the difference is about 360M vs. 110M.
-    peg$cache = {};
+    // will never be needed.
+    var end = options.startOffset || 0;
+    for (var i = options.prevOffset || 0; i < end; i++) {
+        peg$cache[i] = undefined;
+    }
 
-    // Add source offsets for round-tripping. XXX: Add these not just for
-    // toplevelblocks!
     var tokens;
     if ( Array.isArray(b) && b.length ) {
         tokens = tu.flattenIfArray(b);
@@ -252,9 +238,9 @@ block_lines
  */
 block_line
   = h
-  / lists
-  / st:optionalSpaceToken
-    r:( & [{}|!] tl:table_lines { return tl; }
+  / list_item
+  / st:space_or_newline*
+    r:( & [ <{}|!] tl:table_lines { return tl; }
       // tag-only lines should not trigger pre either
       / bts:(bt:block_tag stl:optionalSpaceToken { return bt.concat(stl); })+
         &eolf { return bts; }
@@ -301,28 +287,8 @@ br = s:optionalSpaceToken &newline {
         );
 }
 
-/*
- * Syntax stops: Avoid eating significant tokens for higher-level productions
- * in nested inline productions.
- *
- * Repeated testing of flags is not terribly efficient. See new and faster
- * version below.
- */
-
-/*
- * Syntax stops: Avoid eating significant tokens for higher-level productions
- * in nested inline productions.
- */
 inline_breaks
-  = & {
-        //console.warn('ilbf: ' + input.substr(peg$currPos, 5) );
-        //if ( null !== options.parser.inline_breaks( input, peg$currPos, stops ) ) {
-        //    console.warn('ilb break: ' + pp(input.substr(peg$currPos, 5)) );
-        //} else {
-        //    console.warn('ilb no break: ' + pp(input.substr(peg$currPos, 5)) );
-        //}
-        return inline_breaks( input, peg$currPos, stops );
-      }
+  = & { return inline_breaks( input, peg$currPos, stops ); }
 
 pre_start = "<" pre_tag_name (' '+ [^>]*)? ">"
 
@@ -337,7 +303,6 @@ inlineline
           / !{ return inline_breaks( input, peg$currPos, stops ); } // inline_breaks
             !pre_start
             r:(inline_element / [^\r\n]) { return r; })+ {
-      //console.warn('inlineline out:' + pp(c) + input.substr(peg$reportedPos, peg$currPos));
       return tu.flatten_stringlist( c );
   }
 
@@ -404,16 +369,21 @@ h = & "=" // guard, to make sure '='+ will match.
     / & { stops.dec('h'); return false; }
     ) { return r; }
 
+
 comment
     ='<!--' c:comment_chars* ('-->' / eof)
     {
-        return [new CommentTk( c.join(''), { tsr: [peg$reportedPos, peg$currPos] } )];
+        var data = c.join('');
+        // Bug 58184: Browsers leniently accept --!> as a closing comment tag,
+        // which differs from the php+tidy combo. Suppress that behaviour at
+        // the cost of introducing a dirty diff. Selser should take care of it.
+        data = data.replace(/--!>/g, "--¡>");
+        return [new CommentTk( data, { tsr: [peg$reportedPos, peg$currPos] } )];
     }
 
 comment_chars
   = c:[^-] { return c; }
   / c:'-' !'->' { return c; }
-
 
 
 // Behavior switches. See https://www.mediawiki.org/wiki/Help:Magic_words#Behavior_switches
@@ -426,7 +396,7 @@ behavior_switch
             [new KV('word', '__' + behavior + '__')],
             {
                 tsr: [peg$reportedPos, peg$currPos],
-                src: input.substring( peg$reportedPos, peg$currPos )
+                src: text()
             }
         )
     ];
@@ -542,7 +512,7 @@ isbn
     // ISBNs can only be 10 or 13 chars long
     if ([10, 13].indexOf(isbncode.length) === -1) {
         // just return the string
-        return [ input.substring( peg$reportedPos, peg$currPos ) ];
+        return [ text() ];
     }
 
     return [
@@ -677,16 +647,28 @@ tplarg_or_template
     / template
 
 tplarg_or_template_or_broken
-    = tplarg_or_template / broken_template
+    = ( & {
+      // Refuse to recurse beyond 40 levels. Default in the PHP parser
+      // is $wgMaxTemplateDepth = 40;
+      if ( stops.onCount('templatedepth') === undefined ||
+           stops.onCount('templatedepth') < 40
+      ) {
+          return stops.inc('templatedepth');
+      } else {
+          return false;
+      }
+    } r:( t:tplarg_or_template { stops.dec('templatedepth'); return t; }
+    / & { return stops.dec('templatedepth'); }
+    ) { return r; } ) / broken_template
 
 tplarg_or_template_or_bust
-	= (tplarg_or_template / .)+
+    = (tplarg_or_template / .)+
 
 broken_template
-  = v:( '{{{' / '}}}' / '{{' / '}}' )+
+  = v:( '{{' space_or_newline+ '}}' / ( '{{{' / '}}}' / '{{' / '}}' )+ )
 {
     return [
-        new TagTk('span', [ new KV('typeof', 'mw:Nowiki') ], { tsr: [peg$reportedPos, peg$reportedPos], src: input.substring(peg$reportedPos, peg$currPos) } )]
+        new TagTk('span', [ new KV('typeof', 'mw:Nowiki') ], { tsr: [peg$reportedPos, peg$reportedPos], src: text() } )]
             .concat(v, [new EndTagTk( 'span', [ new KV('typeof', 'mw:Nowiki') ], { tsr: [peg$currPos, peg$currPos] }) ]);
 }
 
@@ -706,7 +688,7 @@ template
       // generically expanded. The TemplateHandler then needs to shift it out
       // again.
       params.unshift( new KV(tu.flattenIfArray( target.tokens ), '', target.srcOffsets) );
-      var obj = new SelfclosingTagTk( 'template', params, {tsr: [peg$reportedPos, peg$currPos], src: input.substring(peg$reportedPos, peg$currPos)} );
+      var obj = new SelfclosingTagTk( 'template', params, {tsr: [peg$reportedPos, peg$currPos], src: text()} );
       //console.warn( 'tokenizer template ' + peg$currPos + );
       //console.warn('template @' + peg$currPos + '::' + input.substr(peg$currPos, 40) );
       return obj;
@@ -733,7 +715,7 @@ tplarg
       } else {
         params.unshift( new KV( '', '') );
       }
-      var obj = new SelfclosingTagTk( 'templatearg', params, {tsr: [peg$reportedPos, peg$currPos], src: input.substring(peg$reportedPos, peg$currPos)} );
+      var obj = new SelfclosingTagTk( 'templatearg', params, {tsr: [peg$reportedPos, peg$currPos], src: text()} );
       //console.warn( 'tokenizer tplarg ' + JSON.stringify( obj, null, 2 ));
       //console.warn('template arg @' + peg$currPos + '::' + input.substr(peg$currPos, 40) );
       return obj;
@@ -852,7 +834,7 @@ wikilink
       //console.warn('lcontent: ' + JSON.stringify( lcontent, null, 2 ) );
 
       if ( target === null ){
-        var src = input.substring(peg$reportedPos, peg$currPos);
+        var src = text();
         return [src];
       }
 
@@ -867,7 +849,7 @@ wikilink
       obj.attribs = obj.attribs.concat( lcontent.content );
       obj.dataAttribs = {
           tsr: [peg$reportedPos, peg$currPos],
-          src: input.substring( peg$reportedPos, peg$currPos ),
+          src: text(),
           pipetrick: lcontent.pipetrick
       };
       return [obj];
@@ -876,14 +858,14 @@ wikilink
 // This production is identical to the 'inline' fragment except
 // that tables are allowed inside image captions.
 link_text_fragment
-  = c:((sol table_lines) / urltext
-          / (!inline_breaks
-              !pre_start
-              r:( inline_element / '[' text_char+ ']' / . ) {
-                  return r;
-              })
+  = c:((sol full_table_in_link_caption)
+       / urltext
+       / (!inline_breaks
+          !pre_start
+          r:( inline_element / '[' text_char+ ']' / . ) { return r; }
+         )
     )+ {
-      //console.warn('inline out:' + pp(c));
+      // console.warn('inline out:' + JSON.stringify(tu.flatten_stringlist(c)));
       return tu.flatten_stringlist( c );
   }
 
@@ -1070,14 +1052,14 @@ pre
  * the scope of the extension content and doesn't spill over to the higher
  * level.  Ex: <math><!--foo</math>.
  *
- * This trick also lets us prevent extension content (that dont accept WT)
+ * This trick also lets us prevent extension content (that don't accept WT)
  * from being parsed as wikitext (Ex: <math>\frac{foo\frac{bar}}</math>)
- * We dont want the "}}" being treated as a template closing tag and closing
+ * We don't want the "}}" being treated as a template closing tag and closing
  * outer templates.
  * ----------------------------------------------------------------------- */
 
 xmlish_tag =
-    t2:(t:generic_tag {
+    t:generic_tag {
         var tagName = t.name.toLowerCase(),
             dp = t.dataAttribs,
             isHtmlTag = Util.isHTMLElementName(tagName),
@@ -1086,193 +1068,115 @@ xmlish_tag =
                             || tagName === 'noinclude'
                             || tagName === 'onlyinclude';
 
-        if (!isHtmlTag && !isInstalledExt && !isIncludeTag) {
+        if ( !isHtmlTag && !isInstalledExt && !isIncludeTag ) {
             return Util.newlinesToNlTks(input.substring(dp.tsr[0], dp.tsr[1]), dp.tsr[0]);
         }
 
-        if (t.constructor !== EndTagTk && !isHtmlTag) {
-            if (t.constructor === TagTk) {
-                var tsr0 = dp.tsr[0],
-                    endTagRE = new RegExp("^(?:.|\n)*?(</\\s*" + tagName + "\\s*>)", "mi"),
-                    restOfInput = input.substring(tsr0),
-                    tagContent = restOfInput.match(endTagRE),
-                    extSrc = null,
-                    tagWidths = null,
-                    endTagWidth = 0;
+        var skipLen = 0;
 
-                if (tagContent) {
-                    extSrc = tagContent[0];
-                    endTagWidth = tagContent[1].length;
+        // EndTagTk
+        if ( t.constructor === EndTagTk || isHtmlTag ) {
+            return t;
 
-                    if (tagName === 'ref') {
-                        // Support 1-level nesting of <ref> tags during tokenizing.
-                        // <ref> tags are the exception to the rule (no nesting of ext tags)
-                        //
-                        // Expand extSrc as long as there is a <ref> tag found in the
-                        // extension source body.
-                        var s = extSrc.substring(peg$currPos-tsr0);
-                        while (s && s.match(new RegExp("<" + tagName + "[^<>]*>"))) {
-                            tagContent = restOfInput.substring(extSrc.length).match(endTagRE);
-                            if (tagContent) {
-                                s = tagContent[0];
-                                endTagWidth = tagContent[1].length;
-                                extSrc += s;
-                            } else {
-                                s = null;
-                            }
-                        }
-                    }
-                } else {
-                    // We accept unclosed references tags,
-                    // as does the PHP parser. They will normalize
-                    // to self-closed in a round trip.
-                    if ( tagName === 'references' ) {
-                        dp.src = input.substring(dp.tsr[0], dp.tsr[1]);
-                        dp.origInput = input;
-                        dp.extLikeTag = true;
-                        dp.isInstalledExt = isInstalledExt;
-                        dp.isIncludeTag = isIncludeTag;
-                        dp.tagWidths = [dp.tsr[1] - dp.tsr[0], 0];
-                        dp.skipLen = 0;
-                    }
+        // SelfclosingTagTk
+        } else if ( t.constructor === SelfclosingTagTk ) {
+
+            dp.src = input.substring(dp.tsr[0], dp.tsr[1]);
+            dp.tagWidths = [dp.tsr[1] - dp.tsr[0], 0];
+            if ( !isInstalledExt ) {
+                return t;
+            }
+
+        // TagTk
+        } else {
+
+            var tsr0 = dp.tsr[0],
+                endTagRE = new RegExp("^(?:.|\n)*?(</\\s*" + tagName + "\\s*>)", "mi"),
+                restOfInput = input.substring(tsr0),
+                tagContent = restOfInput.match(endTagRE);
+
+            if ( !tagContent ) {
+                dp.src = input.substring(dp.tsr[0], dp.tsr[1]);
+                dp.tagWidths = [dp.tsr[1] - dp.tsr[0], 0];
+
+                // We accept unclosed references tags,
+                // as does the PHP parser. They will normalize
+                // to self-closed in a round trip.
+                if ( tagName !== 'references' || !isInstalledExt ) {
                     return t;
                 }
 
-                if (extSrc) {
-                    tagWidths = [peg$currPos-tsr0, endTagWidth];
-                    var extContentLen = extSrc.length - tagWidths[0] - tagWidths[1];
+            } else {
+                var extSrc = tagContent[0];
+                var endTagWidth = tagContent[1].length;
 
-                    // If the xml-tag is a known installed (not native) extension,
-                    // skip the end-tag as well.
-                    var skipLen = extContentLen;
-                    if (isInstalledExt && !isIncludeTag) {
-                        skipLen += endTagWidth;
-                    }
-
-                    // Extension content source
-                    dp.src = extSrc;
-                    dp.origInput = input;
-
-                    // Replace extension content (and possibly the end tag, as well) with
-                    // dummy content so it matches the rule following this match and
-                    // can be tokenized independently (if required).  This is just a trick
-                    // to tokenize ref content with higher priority.
+                if ( tagName === 'ref' ) {
+                    // Support 1-level nesting of <ref> tags during tokenizing.
+                    // <ref> tags are the exception to the rule (no nesting of ext tags)
                     //
-                    // However, if there is a legitimate # char after the end-tag in the
-                    // original text, we need to pick a different char if the char following
-                    // the end-tag is a '#'!
-                    //    Ex: <ref>foo</ref>#bar
-                    // Admittedly a rare use case, but we need a robust fix.
-
-                    var skipChar = '#';
-                    if (input.length >= peg$currPos+skipLen && input[peg$currPos+skipLen] === '#') {
-                        skipChar = '_';
+                    // Expand extSrc as long as there is a <ref> tag found in the
+                    // extension source body.
+                    var s = extSrc.substring(peg$currPos-tsr0);
+                    while (s && s.match(new RegExp("<" + tagName + "[^<>]*>"))) {
+                        tagContent = restOfInput.substring(extSrc.length).match(endTagRE);
+                        if (tagContent) {
+                            s = tagContent[0];
+                            endTagWidth = tagContent[1].length;
+                            extSrc += s;
+                        } else {
+                            s = null;
+                        }
                     }
-                    input = input.slice(0,peg$currPos) +
-                        Util.charSequence('', skipChar, skipLen) +
-                        input.slice(peg$currPos+skipLen);
-
-                    // Temporary state
-                    dp.extLikeTag = true;
-                    dp.isInstalledExt = isInstalledExt;
-                    dp.isIncludeTag = isIncludeTag;
-                    dp.skipLen = skipLen;
-                    dp.tagWidths = tagWidths;
-                    dp.skipChar = skipChar;
-
-                    // console.warn("input: " + input);
                 }
-            } else {
-                // SelfclosingTagTk
-                dp.src = input.substring(dp.tsr[0], dp.tsr[1]);
-                if (isInstalledExt) {
-                    dp.extLikeTag = true;
-                    dp.isInstalledExt = isInstalledExt;
-                    dp.skipLen = 0;
-                    dp.tagWidths = [dp.tsr[1] - dp.tsr[0], 0];
-                    dp.origInput = input;
-                }
-            }
-        }
 
-        currExtTag = t;
-        // console.warn("curr: " + JSON.stringify(currExtTag));
-        return t;
-    }) (
-      dummyText:('#'+ / '_'+) {
-        // Should only match if currExtTag is an extension
-        // with a non-zero skip-length
-        //
-        // Ex: <ref>foo</ref>, <ref>foo</ref>#bar, <ref>foo</ref>_bar
-        var dp = currExtTag ? currExtTag.dataAttribs : null;
-        if (dp &&
-            dp.extLikeTag &&
-            dummyText.length === dp.skipLen &&
-            dummyText[0] === dp.skipChar) {
-            return true;
-         } else {
-            peg$currPos = peg$reportedPos;
-            return peg$FAILED;
-         }
-      }
-      / &  {
-        // Should not match if currExtTag is an extension
-        // or is an extension tag with a zero skip length
-        //
-        // Ex: <ref />foo, <ref />#foo, <ref />_foo
-        return (!currExtTag ||
-            !currExtTag.dataAttribs.extLikeTag ||
-            currExtTag.dataAttribs.skipLen === 0);
-      }
-    ) {
-        if ( Array.isArray(t2) ) {
-            return t2;
-        }
+                // Extension content source
+                dp.src = extSrc;
+                dp.tagWidths = [peg$currPos-tsr0, endTagWidth];
 
-        var ret = t2,
-            dp = t2.dataAttribs;
-        if (dp.extLikeTag) {
-            var tagName = t2.name.toLowerCase();
-            if (dp.isInstalledExt && !dp.isIncludeTag) {
-                // update tsr[1] to span the start and end tags.
-                dp.tsr[1] = peg$currPos;
-                ret = new SelfclosingTagTk('extension', [
-                    new KV('typeof', 'mw:Extension'),
-                    new KV('name', tagName),
-                    new KV('about', options.env.newAboutId()),
-                    new KV('source', dp.src),
-                    new KV('options', t2.attribs)
-                ], dp);
-            } else {
-                // If not a known installed extension, parse content as wikitext.
-                // - include-directives: <noinclude>, <includeonly>, ...
-                // - a non-html5 tag like <big>
-                // Parse ext-content, strip eof, and shift tsr
-                var extContent = dp.src.substring(dp.tagWidths[0], dp.src.length - dp.tagWidths[1]);
-                var extContentToks = (new PegTokenizer(options.env)).tokenize(extContent);
-                if (dp.tagWidths[1] > 0) {
-                    extContentToks = Util.stripEOFTkfromTokens(extContentToks);
+                if ( !isIncludeTag && !isInstalledExt ) {
+                    return t;
                 }
-                Util.shiftTokenTSR(extContentToks, dp.tsr[0] + dp.tagWidths[0]);
-                ret = [t2].concat(extContentToks);
+
+                skipLen = extSrc.length - dp.tagWidths[0] - dp.tagWidths[1];
+
+                // If the xml-tag is a known installed (not native) extension,
+                // skip the end-tag as well.
+                if ( !isIncludeTag ) {
+                    skipLen += endTagWidth;
+                }
+
             }
 
-            // Reset input
-            input = dp.origInput;
-
-            // Clear temporary state
-            dp.extLikeTag = undefined;
-            dp.skipChar = undefined;
-            dp.skipLen = undefined;
-            dp.isInstalledExt = undefined;
-            dp.isIncludeTag = undefined;
-            dp.origInput = undefined;
         }
-        // console.warn("RET: " + JSON.stringify(ret));
 
-        currExtTag = null;
+        peg$currPos += skipLen;
 
+        var ret;
+        if ( !isIncludeTag ) {
+            // update tsr[1] to span the start and end tags.
+            dp.tsr[1] = peg$currPos;
+            ret = new SelfclosingTagTk('extension', [
+                new KV('typeof', 'mw:Extension'),
+                new KV('name', tagName),
+                new KV('about', options.env.newAboutId()),
+                new KV('source', dp.src),
+                new KV('options', t.attribs)
+            ], dp);
+        } else {
+            // If not a known installed extension, parse content as wikitext.
+            // - include-directives: <noinclude>, <includeonly>, ...
+            // - a non-html5 tag like <big>
+            // Parse ext-content, strip eof, and shift tsr
+            var extContent = dp.src.substring(dp.tagWidths[0], dp.src.length - dp.tagWidths[1]);
+            var extContentToks = (new PegTokenizer(options.env)).tokenize(extContent);
+            if (dp.tagWidths[1] > 0) {
+                extContentToks = Util.stripEOFTkfromTokens(extContentToks);
+            }
+            Util.shiftTokenTSR(extContentToks, dp.tsr[0] + dp.tagWidths[0]);
+            ret = [t].concat(extContentToks);
+        }
         return ret;
+
     }
 
 /*
@@ -1464,11 +1368,7 @@ generic_attribute
     name:generic_attribute_name
     namePos:({return peg$currPos;})
     valueData:(optionalSpaceToken
-        // attribute value
-        v:("=" v:(space* vv:att_value { return vv; })? {
-            return v === null ? [] : v;
-        }) { return v; }
-    )?
+        v:generic_attribute_value { return v; })?
 {
     //console.warn( 'generic attribute: ' + pp([name, value]));
     // FIXME: name might just be a template, which can expand to a key-value
@@ -1496,63 +1396,80 @@ generic_attribute
 //  }
 
 // Also eat these chars in a wikitext table or tr attribute name. They are
-// normally not matched by the attribute_preprocessor_text_line.
-broken_table_attribute_name_char = c:[ \t>\[] { return new KV(c, ''); }
+// normally not matched by the generic_attribute_name.
+broken_table_attribute_name_char = c:[ \t\0/=>"'\[] { return new KV(c, ''); }
 
+// The arrangement of chars is to emphasize the split between what's disallowed
+// by html5 and what's necessary to give directive a chance.
 generic_attribute_name
-  = & { return stops.push( 'equal', true ); }
-    name:attribute_preprocessor_text_line
-    {
-        stops.pop( 'equal' );
-        //console.warn( 'generic attribute name: ' + pp( name ) );
-        return name;
-    }
-  / & { return stops.pop( 'equal' ); }
+  = r:( ts:[^ \t\0\n\r/=>"'!<&\[\]|{}]+ { return ts.join(''); }
+        / ! inline_breaks
+          ! '/>'
+          // /=>"' is the html5 attribute name set we do not want.
+          // \[ is to avoid eating links. (see: BUG 553: link with two variables in a piped link)
+          t:( directive / !( space_or_newline / [\[/=>"'] ) c:. { return c; }
+        ) { return t; }
+      )+ {
+    return tu.flatten_string( r );
+  }
 
 // A generic attribute, possibly spanning multiple lines.
 generic_attribute_newline_value
-  = "=" v:( space_or_newline* vv:xml_att_value { return vv; })? {
+  = "=" v:xml_att_value? {
       return v === null ? [] : v;
   }
+
 // A generic but single-line attribute.
 generic_attribute_value
-  = "=" v:(space* vv:att_value { return vv; })? {
+  = "=" v:att_value? {
       return v === null ? [] : v;
   }
 
 // Attribute value, quoted variants can span multiple lines.
 xml_att_value
-  = "'" r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_single? valPos2:({return peg$currPos;}) "'"
+  = space_or_newline* "'" r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_single? valPos2:({return peg$currPos;}) "'"
             { return tu.get_attribute_value_and_source(input, t1, valPos1, valPos2); }
         // Missing end quote: accept | and > look-ahead as heuristic
         / valPos1:({return peg$currPos;}) t2:attribute_preprocessor_text_single_broken? valPos2:({return peg$currPos;}) &[|>]
             { return tu.get_attribute_value_and_source(input, t2, valPos1, valPos2); } )
                 { return r; }
-  / '"' r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_double? valPos2:({return peg$currPos;}) '"'
+  / space_or_newline* '"' r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_double? valPos2:({return peg$currPos;}) '"'
             { return tu.get_attribute_value_and_source(input, t1, valPos1, valPos2); }
         // Missing end quote: accept | and > look-ahead as heuristic
         / valPos1:({return peg$currPos;}) t2:attribute_preprocessor_text_double_broken? valPos2:({return peg$currPos;}) &[|>]
             { return tu.get_attribute_value_and_source(input, t2, valPos1, valPos2); } )
                 { return r; }
-  / valPos1:({return peg$currPos;}) t:attribute_preprocessor_text? valPos2:({return peg$currPos;})
-        { return tu.get_attribute_value_and_source(input, t, valPos1, valPos2); }
+  / space_or_newline* valPos1:({return peg$currPos;}) t:attribute_preprocessor_text? !"=" valPos2:({return peg$currPos;})
+        {   if ( t === null ) {
+                t = "";
+                // Reset the current parse position in order to reparse any
+                // captured spaces, which are needed to separate attributes.
+                peg$currPos = peg$reportedPos;
+            }
+            return tu.get_attribute_value_and_source(input, t, valPos1, valPos2); }
 
 // Attribute value, restricted to a single line.
 att_value
-  = "'" r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_single_line? valPos2:({return peg$currPos;}) ("'" / &"\n")
+  = space* "'" r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_single_line? valPos2:({return peg$currPos;}) "'"
             { return tu.get_attribute_value_and_source(input, t1, valPos1, valPos2); }
         // Missing end quote: accept | and > look-ahead as heuristic
-        / valPos1:({return peg$currPos;}) t2:attribute_preprocessor_text_single_line_broken? valPos2:({return peg$currPos;}) &[|>]
+        / valPos1:({return peg$currPos;}) t2:attribute_preprocessor_text_single_line_broken? valPos2:({return peg$currPos;}) &[|>\n]
             { return tu.get_attribute_value_and_source(input, t2, valPos1, valPos2); } )
                 { return r; }
-  / '"' r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_double_line? valPos2:({return peg$currPos;}) ('"' / &"\n")
+  / space* '"' r:(valPos1:({return peg$currPos;}) t1:attribute_preprocessor_text_double_line? valPos2:({return peg$currPos;}) '"'
             { return tu.get_attribute_value_and_source(input, t1, valPos1, valPos2); }
         // Missing end quote: accept | and > look-ahead as heuristic
-        / valPos1:({return peg$currPos;}) t2:attribute_preprocessor_text_double_line_broken? valPos2:({return peg$currPos;}) &[|>]
+        / valPos1:({return peg$currPos;}) t2:attribute_preprocessor_text_double_line_broken? valPos2:({return peg$currPos;}) &[|>\n]
             { return tu.get_attribute_value_and_source(input, t2, valPos1, valPos2); } )
                 { return r; }
-  / valPos1:({return peg$currPos;}) t:attribute_preprocessor_text_line? valPos2:({return peg$currPos;})
-        { return tu.get_attribute_value_and_source(input, t, valPos1, valPos2); }
+  / space* valPos1:({return peg$currPos;}) t:attribute_preprocessor_text_line? !"=" valPos2:({return peg$currPos;})
+        {   if ( t === null ) {
+                t = "";
+                // Reset the current parse position in order to reparse any
+                // captured spaces, which are needed to separate attributes.
+                peg$currPos = peg$reportedPos;
+            }
+            return tu.get_attribute_value_and_source(input, t ? t : "", valPos1, valPos2); }
 
 /*
  * A variant of generic_tag, but also checks if the tag name is a block-level
@@ -1583,7 +1500,7 @@ block_tag
 /*********************************************************
  *   Lists
  *********************************************************/
-lists = (dtdd / hacky_dl_uses / li) (sol (dtdd / hacky_dl_uses / li))*
+list_item = dtdd / hacky_dl_uses / li
 
 li = bullets:list_char+
      c:nested_block_line
@@ -1607,14 +1524,14 @@ li = bullets:list_char+
  * Fürstenberg.
  */
 hacky_dl_uses = bullets:":"+
-               c:table_lines
+               tbl:(table_lines (sol table_lines)*)
                s:space* // Do we really need to RT this?
                &comment_space_eolf
 {
     // Leave bullets as an array -- list handler expects this
     var li = new TagTk( 'listItem', [], { tsr: [peg$reportedPos, peg$reportedPos + bullets.length] }  );
     li.bullets = bullets;
-    return tu.flattenIfArray([li, c || [], s || []]);
+    return tu.flattenIfArray([li, tbl || [], s || []]);
 }
 
 dtdd
@@ -1649,9 +1566,9 @@ list_char = [*#:;]
 
 
 
-/*********************************************************************
+/******************************************************************************
  * Tables
- *
+ * ------
  * Table productions are geared to support independent parsing of fragments in
  * templates (the common table start / row / table end use case). The tokens
  * produced by these fragments then match up to a table while building the
@@ -1660,45 +1577,98 @@ list_char = [*#:;]
  *
  * The separate table_lines production is faster than moving those productions
  * directly to block_lines.
- *********************************************************************/
+ *
+ * Notes about the full_table_in_link_caption production
+ * -----------------------------------------------------
+ * However, for link-tables, we have introduced a stricter parse wherein
+ * we require table-start and table-end tags to not come from a template.
+ * In addition, this new production doesn't accept fosterable-content in
+ * the table unlike the more lax (sol table_lines)+ production.
+ *
+ * This is the best we can do at this time since we cannot distinguish
+ * between table rows and image options entirely in the tokenizer.
+ *
+ * Consider the following examples:
+ *
+ * Example 1:
+ *
+ * [[Image:Foo.jpg|left|30px|Example 1
+ * {{This-template-returns-a-table-start-tag}}
+ * |foo
+ * {{This-template-returns-a-table-end-tag}}
+ * ]]
+ *
+ * Example 2:
+ *
+ * [[Image:Foo.jpg|left|30px|Example 1
+ * {{echo|a}}
+ * |foo
+ * {{echo|b}}
+ * ]]
+ *
+ * So, we cannot know a priori (without preprocessing or fully expanding
+ * all templates) if "|foo" in the two examples is a table cell or an image
+ * option. This is a limitation of our tokenizer-based approach compared to
+ * the preprocessing-based approach of the PHP parser.
+ *
+ * Given this limitation, we are okay forcing a full-table context in
+ * link captions (if necessary, we can relax the fosterable-content requirement
+ * but that is broken wikitext anyway, so we can force that edge-case wikitext
+ * to get fixed by rejecting it).
+ ******************************************************************************/
+
+full_table_in_link_caption
+  = // & { console.warn('enter full_table_in_link_caption: ' + input.substr(peg$currPos, 20)); return true; }
+    (! inline_breaks / & '{{!}}' )
+    r:(
+        & { return stops.push('table', true); }
+        tbl:(
+            table_start_tag optionalNewlines
+            (sol table_content_line optionalNewlines)*
+            sol table_end_tag)
+        {
+            stops.pop('table');
+            return tbl;
+        }
+      / & { return stops.pop('table'); }
+    ) { return r; }
 
 table_lines
-  = //& { console.warn('enter table_lines: ' + input.substr(peg$currPos, 20)); return true; }
+  = // & { console.warn('enter table_lines: ' + input.substr(peg$currPos, 20)); return true; }
     (! inline_breaks / & '{{!}}' )
     r:(
         & { return stops.push('table', true); }
         tl:table_line
-        tls:(
-            nls:optionalNewlines
-            s:sol
-            tl2:table_line { return nls.concat(s, tl2); }
-        )*
+        nls:optionalNewlines
         {
             stops.pop('table');
-            //console.warn('table_lines: ' + pp(tl.concat(tls)));
-            return tl.concat( tls );
+            // console.warn('table_lines: ' + JSON.stringify(tl.concat(nls)));
+            return tl.concat(nls);
         }
       / & { return stops.pop('table'); }
     ) { return r; }
 
 // This production assumes start-of-line position!
 table_line
-  = (space / comment)* (table_start_tag
-  / table_heading_tags
-  / table_row_tag
-  / table_data_tags
-  / table_caption_tag
-  / table_end_tag)
+  = table_start_tag
+  / table_content_line
+  / table_end_tag
 
+table_content_line = (space / comment)* (
+    table_heading_tags
+    / table_row_tag
+    / table_data_tags
+    / table_caption_tag
+  )
 
 table_start_tag
-  = b:"{" p:pipe
+  = sc:(space / comment)* startPos:({ return peg$currPos; }) b:"{" p:pipe
     // ok to normalize away stray |} on rt (see bug 57360)
     & { return stops.push('table', false); }
     ta:(generic_attribute / broken_table_attribute_name_char)*
     tsEndPos:({stops.pop('table'); return peg$currPos;})
     {
-        var tblStart = new TagTk( 'table', [], { tsr: [peg$reportedPos, tsEndPos] } );
+        var tblStart = new TagTk( 'table', [], { tsr: [startPos, tsEndPos] } );
         if (p !== "|") {
             // Variation form default
             // "<brace-char>"+p is triggering some bug in pegJS
@@ -1709,7 +1679,7 @@ table_start_tag
             tblStart.attribs = ta;
         }
 
-        return [tblStart];
+        return sc.concat([tblStart]);
     }
 
 table_caption_tag
@@ -1723,9 +1693,8 @@ table_caption_tag
             .concat([new EndTagTk('caption')]);
     }
 
-
 table_row_tag
-  = //& { console.warn("table row enter @" + input.substr(peg$currPos, 30)); return true; }
+  = // & { console.warn("table row enter @" + input.substr(peg$currPos, 30)); return true; }
     // avoid recursion via nested_block_in_table
     ! { return stops.onStack('tableDataBlock'); }
     p:pipe dashes:"-"+
@@ -1792,7 +1761,7 @@ implicit_table_data_tag
     }
 
 table_data_tag
-  = //& { dp("table_data enter, pos=" + peg$currPos + input.substr(peg$currPos,10)); return true; }
+  = // & { console.warn("table_data_tag enter @" + input.substr(peg$currPos, 30)); return true; }
     ! "}"
     arg:row_syntax_table_args?
     //& { console.warn("past attrib, pos=" + peg$currPos + input.substr(peg$currPos,10)); return true; }
@@ -1836,14 +1805,14 @@ table_heading_tag
     / & { return stops.pop('th'); }
 
 table_end_tag
-  = space* p:pipe b:"}" {
-      var tblEnd = new EndTagTk( 'table', [], { tsr: [peg$reportedPos, peg$currPos] } );
+  = sc:(space / comment)* startPos:({ return peg$currPos; }) p:pipe b:"}" {
+      var tblEnd = new EndTagTk( 'table', [], { tsr: [startPos, peg$currPos] } );
       if (p !== "|") {
           // p+"<brace-char>" is triggering some bug in pegJS
           // I cannot even use that expression in the comment!
           tblEnd.dataAttribs.endTagSrc = p+b;
       }
-      return [ tblEnd ];
+      return sc.concat([tblEnd]);
   }
 
 /**
@@ -1889,7 +1858,7 @@ row_syntax_table_args
  * clarify this carefully!
  */
 
-text_char = [^'<~[{\n\r:\]}|!=]
+text_char = [^-'<~[{\n\r:;\]}|!=]
 
 /* Legend
  * '    quotes (italic/bold)
@@ -1915,9 +1884,11 @@ text_char = [^'<~[{\n\r:\]}|!=]
  * :    separate definition in ; term : definition
  * ]    end of link
  * }    end of parser func/transclusion/template arg
+ * -    start of lang_variant -{ ... }-
+ * ;    separator in lang_variant
  */
 
-urltext = ( t:[^'<~[{\n\pPrRfFgGhHiImMnNsStTwW_|!:\]} &=]+ { return t.join(''); }
+urltext = ( t:[^-'<~[{\n\pPrRfFgGhHiImMnNsStTwW_|!:;\]} &=]+ { return t.join(''); }
           / & [/fFgGhHiImMnNsStTwWIPR] al:autolink { return al; }
           / & "&" he:htmlentity { return he; }
           // Convert trailing space into &nbsp;
@@ -1931,12 +1902,9 @@ urltext = ( t:[^'<~[{\n\pPrRfFgGhHiImMnNsStTwW_|!:\]} &=]+ { return t.join(''); 
               ];
           }
           / & ('__') bs:behavior_switch { return bs; }
-          // / t:text_char
-          // Inline copy of text_char for performance, as about 96% of
-          // text_char calls originate here.
-          // Keep in sync and/or remove after upgrading to pegjs 0.8 which
-          // inlines simple productions like these automatically.
-          / [^'<~[{\n\r:\]}|!=] )+
+          // About 96% of text_char calls originate here.
+          // pegjs 0.8 inlines this simple production automatically.
+          / text_char )+
 
 /*
     '//', // for protocol-relative URLs, but not in text!
@@ -2016,7 +1984,13 @@ optionalNewlines
         }
     }
 
-sol = (empty_line_with_comments / sol_prefix) sol_rest
+sol = (empty_line_with_comments / sol_prefix) (comment / (
+        ( & { return stops.push("sol_il", true); }
+          i:include_limits
+          & { stops.pop("sol_il"); return true; }
+        ) { return i; }
+        / & { return stops.pop("sol_il"); }
+      ))*
 
 sol_prefix
   = newlineToken
@@ -2026,40 +2000,6 @@ sol_prefix
       // NOTE: Explicitly check for 'false' and not a falsy value
       return peg$currPos === 0 && options.pegTokenizer.savedSOL !== false;
   } { return []; }
-
-sol_rest =
-    // Eat multi-line comment, so that syntax after still matches as if it
-    // was actually preceded by a newline
-    cn:( c:comment n:newlineToken? {
-              if ( n !== null ) {
-                  return [c, n];
-              } else {
-                  return [c];
-              }
-          }
-    )*
-    // Eat <*include*> section at start of line, so that start-of-line
-    // syntax after it still matches
-    ni:( niStart:({return peg$currPos;})
-         s:space*
-        "<" c:"/"? t:include_limits
-        ">" {return [s.join(''), c, t, [niStart, peg$currPos]];} )?
-    {
-        var niToken = [];
-        if ( ni !== null ) {
-            if ( ni[1] === '/' ) {
-                niToken = [new EndTagTk( ni[2], [], { tsr: ni[3] } )];
-            } else {
-                niToken = [new TagTk( ni[2], [], { tsr: ni[3] } )];
-            }
-        }
-
-        if ( cn === null ) {
-            cn = [];
-        }
-
-        return cn.concat(niToken);
-    }
 
 empty_line_with_comments
   = sp:sol_prefix p:({return peg$currPos;}) c:(space* comment (space / comment)* newline)+ {
@@ -2091,99 +2031,66 @@ nl_comment_space = newline / comment_space
  */
 
 include_limits =
-  "</" name:[0-9a-zA-Z]+ space_or_newline* ">" {
-     // End tag only
-     name = name.join('');
-     var incl = name.toLowerCase();
-     if (incl === "noinclude" || incl === "onlyinclude" || incl === "includeonly") {
-         var dp = {tsr: [peg$reportedPos, peg$currPos]};
-         // Record variant since tag is not in normalized lower case
-         if (name !== incl) {
-             dp.srcTagName = name;
-         }
-         return new EndTagTk(name, [], dp);
-     } else {
-         peg$currPos = peg$reportedPos;
-         return peg$FAILED;
-     }
-  }
-  / inclTag:("<" name:[0-9a-zA-Z]+ space_or_newline* ">" {
-     // Start tag only
-     name = name.join('');
-     var incl = name.toLowerCase();
-     if (incl === "noinclude" || incl === "onlyinclude" || incl === "includeonly") {
-         var dp = {tsr: [peg$reportedPos, peg$currPos]},
-             restOfInput = input.substring(peg$reportedPos),
-             tagContent = restOfInput.match(new RegExp("^(.|\n)*?(</\\s*" + incl + "\\s*>)", "m"));
+  "<" c:"/"? name:[0-9a-zA-Z]+ space_or_newline* ">" {
+    name = name.join('');
+    var incl = name.toLowerCase();
 
-         if (!tagContent) {
-            peg$currPos = peg$reportedPos;
-            return peg$FAILED;
-         }
+    if ( incl !== "noinclude" && incl !== "onlyinclude" && incl !== "includeonly" ) {
+      peg$currPos = peg$reportedPos;
+      return peg$FAILED;
+    }
 
-         var tagWidths = [peg$currPos-peg$reportedPos, (tagContent ? tagContent[2].length : 0)],
-             inclSrc = tagContent ? tagContent[0] : restOfInput,
-             inclContentLen = inclSrc.length - tagWidths[0] - tagWidths[1],
-             skipLen = inclContentLen;
+    var dp = { tsr: [peg$reportedPos, peg$currPos] };
 
-         dp.src = inclSrc;
-         dp.origInput = input;
+    // Record variant since tag is not in normalized lower case
+    if ( name !== incl ) {
+      dp.srcTagName = name;
+    }
 
-         // Replace incl-content with '#' or '_'
-         var skipChar = '#';
-         if (input.length >= peg$currPos+skipLen && input[peg$currPos+skipLen] === '#') {
-             skipChar = '_';
-         }
-         input = input.slice(0,peg$currPos) +
-             Util.charSequence('', skipChar, skipLen) +
-             input.slice(peg$currPos+skipLen);
+    // End tag only
+    if ( c ) {
+      return new EndTagTk(name, [], dp);
+    }
 
-         // Temporary state
-         dp.skipLen = skipLen;
-         dp.tagWidths = tagWidths;
-         dp.skipChar = skipChar;
+    var restOfInput = input.substring(peg$currPos),
+        tagContent = restOfInput.match(new RegExp("^([^]*?)(?:</\\s*" + incl + "\\s*>)", "m"));
 
-         // Record variant since tag is not in normalized lower case
-         if (name !== incl) {
-             dp.srcTagName = name;
-         }
+    // Start tag only
+    if ( !tagContent || !tagContent[1] ) {
+      return new TagTk(name, [], dp);
+    }
 
-         return new TagTk(name, [], dp);
-     } else {
-         peg$currPos = peg$reportedPos;
-         return peg$FAILED;
-     }
-  }) dummyText:('#'+ / '_'+) {
-      var dp = inclTag.dataAttribs;
-      if (dummyText.length !== dp.skipLen || dummyText[0] !== dp.skipChar) {
-          peg$currPos = peg$reportedPos;
-          return peg$FAILED;
+    // Get the content
+    var inclContent = tagContent[1];
+
+    // Preserve SOL where necessary (for onlyinclude and noinclude)
+    // Note that this only works because we encounter <*include*> tags in
+    // the toplevel content and we rely on the php preprocessor to expand
+    // templates, so we shouldn't ever be tokenizing inInclude.
+    // Last line should be empty (except for comments)
+    if ( incl !== "includeonly" && stops.onStack("sol_il") ) {
+      var last = inclContent.split("\n");
+      if ( !/^(<!--([^-]|-(?!->))*-->)*$/.test(last[last.length - 1]) ) {
+        peg$currPos = peg$reportedPos;
+        return peg$FAILED;
       }
+    }
 
-      // Tokenize include content in a new tokenizer
-      var inclContent = dp.src.substring(dp.tagWidths[0], dp.src.length - dp.tagWidths[1]),
-          inclContentToks = (new PegTokenizer(options.env)).tokenize(inclContent);
+    // Tokenize include content in a new tokenizer
+    var inclContentToks = (new PegTokenizer(options.env)).tokenize(inclContent);
+    inclContentToks = Util.stripEOFTkfromTokens(inclContentToks);
 
-      if (dp.tagWidths[1] > 0) {
-          inclContentToks = Util.stripEOFTkfromTokens(inclContentToks);
-      }
+    // Shift tsr
+    Util.shiftTokenTSR(inclContentToks, peg$currPos);
 
-      // shift tsr
-      Util.shiftTokenTSR(inclContentToks, dp.tsr[0] + dp.tagWidths[0]);
+    // Skip past content
+    peg$currPos += inclContent.length;
 
-      // Reset input
-      input = dp.origInput;
-
-      // Clear temporary state
-      dp.skipChar = undefined;
-      dp.skipLen = undefined;
-      dp.origInput = undefined;
-
-      return [inclTag].concat(inclContentToks);
+    return [new TagTk(name, [], dp)].concat(inclContentToks);
   }
 
 // Start of file
-sof = & { return peg$currPos === 0; }
+sof = & { return peg$currPos === (options.startOffset || 0); }
 
 // End of file
 eof = & { return peg$currPos === input.length; }
@@ -2204,20 +2111,6 @@ directive
   / tplarg_or_template
   / & "&" e:htmlentity { return e; }
   / include_limits
-
-// Plain text, but can contain templates, template arguments, comments etc-
-// all stuff that is normally handled by the preprocessor
-// Returns either a list of tokens, or a plain string (if nothing is to be
-// processed).
-preprocessor_text
-  = r:( t:[^<~[{\n\r\t|!\]}{ &=]+ { return t.join(''); }
-  / !inline_breaks dt:(
-      directive
-    / text_char ) { return dt; }
-  )+ {
-      // r will always be an array
-      return tu.flattenIfArray( r );
-  }
 
 wikilink_preprocessor_text
   = r:( t:[^<[{\n\r\t|!\]}{ &]+ { return t.join(''); }
@@ -2265,6 +2158,7 @@ attribute_preprocessor_text_single
   {
       return tu.flatten_string( r );
   }
+
 attribute_preprocessor_text_single_broken
   = r:( t:[^{}&'<>|]+ { return t.join(''); }
   / !inline_breaks r:(
@@ -2274,6 +2168,7 @@ attribute_preprocessor_text_single_broken
   {
       return tu.flatten_string( r );
   }
+
 attribute_preprocessor_text_double
   = r:( t:[^{}&"<]+ { return t.join(''); }
   / !inline_breaks r:(
@@ -2284,6 +2179,7 @@ attribute_preprocessor_text_double
       //console.warn( 'double:' + pp(r) );
       return tu.flatten_string( r );
   }
+
 attribute_preprocessor_text_double_broken
   = r:( t:[^{}&"<>|]+ { return t.join(''); }
   / !inline_breaks r:(
@@ -2297,7 +2193,7 @@ attribute_preprocessor_text_double_broken
 
 // Variants with the entire attribute on a single line
 attribute_preprocessor_text_line
-  = r:( ts:[^=<>{\n\r&'"\t \[\]|{}/!]+ { return ts.join(''); }
+  = r:( ts:[^=<>\n\r&'"\t \[\]|{}/!]+ { return ts.join(''); }
         /  !inline_breaks
             ! '/>'
             t:(
@@ -2305,7 +2201,7 @@ attribute_preprocessor_text_line
               // Eat insane tags-inside-attributes. Example:
               // <hiddentext>generated with.. </hiddentext>
               / &generic_tag nb:nested_block_line { return nb; }
-              / !(space_or_newline / [\[>]) c:. {
+              / !(space_or_newline / [\[=>]) c:. {
                     //console.warn( 'aptl: ' + pp(c) );
                     return c;
                 }
@@ -2317,13 +2213,14 @@ attribute_preprocessor_text_line
   }
 
 attribute_preprocessor_text_single_line
-  = r:( t:[^{}&'<|!\n]+ { return t.join(''); }
+  = r:( t:[^{}&'<\n]+ { return t.join(''); }
   / !inline_breaks r:(
       directive
     / ![\r\n] q:[{}&<] { return q; } ) { return r; }
   )* {
       return tu.flatten_string( r );
   }
+
 attribute_preprocessor_text_single_line_broken
   = r:( t:[^{}&'<>|!\n]+ { return t.join(''); }
   / !inline_breaks r:(
@@ -2332,14 +2229,16 @@ attribute_preprocessor_text_single_line_broken
   )* {
       return tu.flatten_string( r );
   }
+
 attribute_preprocessor_text_double_line
-  = r:( t:[^{}&"<|!\n]+ { return t.join(''); }
+  = r:( t:[^{}&"<\n]+ { return t.join(''); }
   / !inline_breaks r:(
       directive
     / ![\r\n] q:[{}&<] { return q; } ) { return r; }
   )* {
       return tu.flatten_string( r );
   }
+
 attribute_preprocessor_text_double_line_broken
   = r:( t:[^{}&"<>|!\n]+ { return t.join(''); }
   / !inline_breaks r:(
