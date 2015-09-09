@@ -47,8 +47,12 @@ module.exports = function(parsoidConfig) {
 		}
 
 		var iwp = parsoidConfig.reverseMwApiMap.get(req.params.domain);
+
 		if (!iwp) {
-			return errOut('Invalid domain: ' + req.params.domain);
+			// NOTE: This is not the most bulletproof code. It expects the API endpoint
+			//       to be at a very specific location
+			parsoidConfig.setMwApi({ uri: 'http://' + req.params.domain + '/api.php' });
+			iwp = parsoidConfig.reverseMwApiMap.get(req.params.domain);
 		}
 
 		res.locals.apiVersion = version;
