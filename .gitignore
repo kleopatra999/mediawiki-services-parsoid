@@ -4,6 +4,7 @@
 .*.swp
 .DS_Store
 .deploy
+.idea/*
 
 
 api/nohup.out
