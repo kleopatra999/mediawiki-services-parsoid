@@ -23,7 +23,9 @@ require('../lib/core-upgrade.js');
 var cluster = require('cluster'),
 	path = require('path'),
 	util = require('util'),
-	fs = require('fs');
+	fs = require('fs'),
+	semver = require('semver'),
+	Promise = require('../lib/utils/promise.js');
 
 // process arguments
 var opts = require( "yargs" )
@@ -98,32 +100,79 @@ ParsoidLogger.prototype.registerLoggingBackends.call(
 	logger, [ "fatal", "error", "warning", "info" ], parsoidConfig
 );
 
+// Workaround for https://github.com/nodejs/node/pull/3510
+var fixClusterHandleLeak = function(worker) {
+	if (semver.gte(process.version, '4.2.2')) { return; }
+	var exitHandler = worker.process.listeners('exit')[0].listener;
+	var disconnectHandler = worker.process.listeners('disconnect')[0].listener;
+	worker.process.removeListener('exit', exitHandler);
+	worker.process.once('exit', function() {
+		if (worker.state !== 'disconnected') {
+			disconnectHandler();
+		}
+		exitHandler.apply(this, arguments);
+	});
+};
+
+var stopWorker = Promise.method(function(workerId) {
+	var worker = cluster.workers[workerId];
+	// ctrl-c sends SIGINT to all the workers, so make sure we haven't lost
+	// the race.  In the disconnected state, `worker.disconnect()` throws
+	// an error, "channel closed".
+	if (worker.state === 'disconnected') { return; }
+	var p = new Promise(function(resolve) {
+		var timeout = setTimeout(function() {
+			// https://nodejs.org/api/cluster.html#cluster_worker_kill_signal_sigterm
+			// `worker.kill()` wants `worker.state === 'disconnected'`.
+			// If that doesn't happen shortly, escalate!
+			worker.process.kill('SIGKILL');
+			resolve();
+		}, 10 * 1000);
+		worker.once('disconnect', function() {
+			clearTimeout(timeout);
+			worker.process.kill('SIGKILL');
+			resolve();
+		});
+	});
+	worker.disconnect();
+	return p;
+});
+
+process.on('uncaughtException', function(err) {
+	logger.log('fatal', 'uncaught exception', err);
+});
+
 if ( cluster.isMaster && argv.n > 0 ) {
 	// Master
 
-	var timeoutHandler, timeouts = new Map();
+	var timeoutHandler;
+	var timeouts = new Map();
 	var spawn = function() {
 		var worker = cluster.fork();
+		fixClusterHandleLeak(worker);
 		worker.on('message', timeoutHandler.bind(null, worker));
 	};
 
 	// Kill cpu hogs
-	timeoutHandler = function( worker, msg ) {
-		if ( msg.type === 'startup' ) {
+	timeoutHandler = function(worker, msg) {
+		if (msg.type === 'startup') {
 			// relay startup messages to parent process
 			if (process.send) { process.send(msg); }
 		}
-		if ( msg.type !== "timeout" ) { return; }
-		if ( msg.done ) {
-			clearTimeout( timeouts.get( msg.reqId ) );
-			timeouts.delete( msg.reqId );
-		} else if ( msg.timeout ) {
+		if (msg.type !== "timeout") { return; }
+		if (msg.done) {
+			clearTimeout(timeouts.get(msg.timeoutId));
+			timeouts.delete(msg.timeoutId);
+		} else if (msg.timeout) {
 			var pid = worker.process.pid;
-			timeouts.set(msg.reqId, setTimeout(function() {
-				timeouts.delete( msg.reqId );
-				if ( worker.id in cluster.workers ) {
-					logger.log( "warning", util.format( "Cpu timeout; killing worker %s.", pid ) );
-					worker.kill("SIGKILL");
+			timeouts.set(msg.timeoutId, setTimeout(function() {
+				timeouts.delete(msg.timeoutId);
+				if (worker.id in cluster.workers) {
+					logger.log("warning", util.format(
+						"Cpu timeout fetching: %s; killing worker %s.",
+						msg.location, pid
+					));
+					stopWorker(worker.id);
 					spawn();
 				}
 			}, msg.timeout));
@@ -131,26 +180,28 @@ if ( cluster.isMaster && argv.n > 0 ) {
 	};
 
 	// Fork workers
-	var worker;
-	logger.log( "info", util.format( "initializing %s workers", argv.n ) );
+	logger.log("info", util.format("initializing %s workers", argv.n));
 	for (var i = 0; i < argv.n; i++) {
 		spawn();
 	}
 
+	var shuttingDown = false;
+
 	cluster.on('exit', function(worker, code, signal) {
-		if ( !worker.suicide ) {
+		if (!worker.suicide && !shuttingDown) {
 			var pid = worker.process.pid;
-			logger.log( "warning", util.format( "worker %s died (%s), restarting.", pid, code ) );
+			logger.log("warning", util.format("worker %s died (%s), restarting.", pid, signal || code));
 			spawn();
 		}
 	});
 
 	var shutdown_master = function() {
-		logger.log( "info", "shutting down, killing workers" );
-		cluster.disconnect(function() {
-			logger.log( "info", "exiting" );
+		shuttingDown = true;
+		logger.log('info', 'shutting down, killing workers');
+		Promise.map(Object.keys(cluster.workers), stopWorker).then(function() {
+			logger.log('info', 'exiting');
 			process.exit(0);
-		});
+		}).done();
 	};
 
 	process.on('SIGINT', shutdown_master);
@@ -164,6 +215,7 @@ if ( cluster.isMaster && argv.n > 0 ) {
 		process.exit(0);
 	};
 
+	process.on('SIGINT', shutdown_worker);
 	process.on('SIGTERM', shutdown_worker);
 	process.on('disconnect', shutdown_worker);
 
