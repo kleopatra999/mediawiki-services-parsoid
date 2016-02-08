@@ -9,7 +9,8 @@ var path = require('path'),
 	cluster = require('cluster'),
 	domino = require('domino'),
 	pkg = require('../package.json'),
-	apiUtils = require('./utils');
+	apiUtils = require('./utils'),
+	semver = require('semver');
 
 
 // relative includes
@@ -75,7 +76,7 @@ var makeDone = function( reqId ) {
 };
 
 // Cluster support was very experimental and missing methods in v0.8.x
-var sufficientNodeVersion = !/^v0\.[0-8]\./.test( process.version );
+var sufficientNodeVersion = semver.gte(process.version, '0.10.0');
 
 var cpuTimeout = function( p, res ) {
 	var reqId = res.local("reqId");
