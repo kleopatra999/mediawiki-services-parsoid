@@ -259,19 +259,24 @@ var html2wt = function( req, res, html ) {
 
 	var out = [];
 	var p = new Promise(function( resolve, reject ) {
+		env.log('info', 'start promise [CE-3759]');
 		if ( v2 && v2.original && v2.original.wikitext ) {
 			env.setPageSrcInfo( v2.original.wikitext.body );
+			env.log('info', 'resolve if v2 wikitext [CE-3759]');
 			return resolve();
 		} else if ( !env.conf.parsoid.fetchWT ) {
+			env.log('info', 'resolve if dont fetch WT [CE-3759]');
 			return resolve();
 		}
 		var target = env.resolveTitle( env.normalizeTitle(env.page.name), '' );
 		var tpr = new TemplateRequest( env, target, env.page.id );
+		env.log('info', 'template request  [CE-3759]');
 		tpr.once('src', function( err, src_and_metadata ) {
 			if ( err ) {
 				env.log("error", "There was an error fetching " +
 						"the original wikitext for ", target, err);
 			} else {
+				env.log('info', 'set page src info [CE-3759]');
 				env.setPageSrcInfo( src_and_metadata );
 			}
 			resolve();
@@ -280,19 +285,26 @@ var html2wt = function( req, res, html ) {
 		var doc = DU.parseHTML( html.replace(/\r/g, '') ),
 			Serializer = parsoidConfig.useSelser ? SelectiveSerializer : WikitextSerializer,
 			serializer = new Serializer({ env: env, oldid: env.page.id });
+
+		env.log('info', 'handle promise callback [CE-3759]');
 		if ( v2 && v2["data-parsoid"] ) {
+			env.log('info', 'apply data-parsoid [CE-3759]');
 			DU.applyDataParsoid( doc, v2["data-parsoid"].body );
 		}
 		if ( v2 && v2.original && v2.original.html ) {
+			env.log('info', 'apply original data-parsoid [CE-3759]');
 			env.page.dom = DU.parseHTML( v2.original.html.body );
 			DU.applyDataParsoid( env.page.dom, v2.original["data-parsoid"].body );
 		}
+		env.log('info', 'return primisify [CE-3759]');
 		return Promise.promisify( serializer.serializeDOM, false, serializer )(
 			doc.body, function( chunk ) { out.push( chunk ); }, false
 		);
 	}).timeout( REQ_TIMEOUT ).then(function() {
+		env.log('info', 'timeout start [CE-3759]');
 		apiUtils.setHeader(res, env, 'X-Parsoid-Performance', env.getPerformanceHeader());
 		if ( v2 ) {
+			env.log('info', 'timeout if v2 [CE-3759]');
 			apiUtils.jsonResponse(res, env, {
 				wikitext: {
 					headers: {
@@ -303,6 +315,7 @@ var html2wt = function( req, res, html ) {
 				}
 			});
 		} else {
+			env.log('info', 'timeout not v2 [CE-3759]');
 			apiUtils.setHeader(res, env, 'Content-Type', 'text/x-mediawiki; charset=UTF-8');
 			apiUtils.endResponse(res, env, out.join(''));
 		}
